@@ -1661,8 +1661,12 @@ test/
   toon_test.exs                   # Smoke tests for public API
   toon/
     conformance_test.exs          # All spec fixtures (uses @external_resource)
-    encoder_test.exs              # Unit tests for encoder
-    decoder_test.exs              # Unit tests for decoder
+    decode_stream_test.exs        # Port of decodeStream.test.ts — streaming decode events
+    encode_lines_test.exs         # Port of encodeLines.test.ts — encode_lines/2 contract
+    normalization_test.exs        # Port of normalization.test.ts — host-type normalization
+    replacer_test.exs             # Port of replacer.test.ts — replacer callback
+    encoder_test.exs              # Unit tests for encoder internals
+    decoder_test.exs              # Unit tests for decoder internals
     string_utils_test.exs         # Quoting/escaping tests
   fixtures/
     SPEC_COMMIT.txt               # Pinned toon-format/spec commit SHA
@@ -2429,6 +2433,697 @@ Key test groupings:
 - **Protocol contract**: `Toon.Encodable` custom implementations
 - **API guarantees**: option validation, error wrapping, type contracts
 
+### Ported Tests from Reference Implementation (Priority 2)
+
+The TypeScript reference implementation contains 4 handwritten test suites beyond the
+fixture-based tests. Each MUST be ported 1-to-1 to Elixir. These complement the conformance
+fixtures with behavioural contracts for streaming, normalization, and the replacer API.
+
+**Source files:** `toon-format/toon/packages/toon/test/`
+
+---
+
+#### `test/toon/decode_stream_test.exs` (port of `decodeStream.test.ts`)
+
+Tests `Toon.decode_stream_sync/2` (event emitter) and `Toon.decode_from_lines/2`.
+
+```elixir
+defmodule Toon.DecodeStreamTest do
+  use ExUnit.Case, async: true
+
+  describe "decode_stream_sync/2" do
+    test "decode simple object emits correct events" do
+      lines = String.split("name: Alice\nage: 30", "\n")
+      events = Toon.decode_stream_sync(lines) |> Enum.to_list()
+
+      assert events == [
+        %{type: :start_object},
+        %{type: :key, key: "name"},
+        %{type: :primitive, value: "Alice"},
+        %{type: :key, key: "age"},
+        %{type: :primitive, value: 30},
+        %{type: :end_object}
+      ]
+    end
+
+    test "decode nested object emits correct events" do
+      lines = String.split("user:\n  name: Alice\n  age: 30", "\n")
+      events = Toon.decode_stream_sync(lines) |> Enum.to_list()
+
+      assert events == [
+        %{type: :start_object},
+        %{type: :key, key: "user"},
+        %{type: :start_object},
+        %{type: :key, key: "name"},
+        %{type: :primitive, value: "Alice"},
+        %{type: :key, key: "age"},
+        %{type: :primitive, value: 30},
+        %{type: :end_object},
+        %{type: :end_object}
+      ]
+    end
+
+    test "decode inline primitive array emits correct events" do
+      lines = ["scores[3]: 95, 87, 92"]
+      events = Toon.decode_stream_sync(lines) |> Enum.to_list()
+
+      assert events == [
+        %{type: :start_object},
+        %{type: :key, key: "scores"},
+        %{type: :start_array, length: 3},
+        %{type: :primitive, value: 95},
+        %{type: :primitive, value: 87},
+        %{type: :primitive, value: 92},
+        %{type: :end_array},
+        %{type: :end_object}
+      ]
+    end
+
+    test "decode inline array with empty string key" do
+      lines = [~s(""[2]: 1,2)]
+      events = Toon.decode_stream_sync(lines) |> Enum.to_list()
+
+      assert events == [
+        %{type: :start_object},
+        %{type: :key, key: ""},
+        %{type: :start_array, length: 2},
+        %{type: :primitive, value: 1},
+        %{type: :primitive, value: 2},
+        %{type: :end_array},
+        %{type: :end_object}
+      ]
+    end
+
+    test "decode list array emits correct events" do
+      lines = String.split("items[2]:\n  - Apple\n  - Banana", "\n")
+      events = Toon.decode_stream_sync(lines) |> Enum.to_list()
+
+      assert events == [
+        %{type: :start_object},
+        %{type: :key, key: "items"},
+        %{type: :start_array, length: 2},
+        %{type: :primitive, value: "Apple"},
+        %{type: :primitive, value: "Banana"},
+        %{type: :end_array},
+        %{type: :end_object}
+      ]
+    end
+
+    test "decode tabular array emits correct events" do
+      lines = String.split("users[2]{name,age}:\n  Alice, 30\n  Bob, 25", "\n")
+      events = Toon.decode_stream_sync(lines) |> Enum.to_list()
+
+      assert events == [
+        %{type: :start_object},
+        %{type: :key, key: "users"},
+        %{type: :start_array, length: 2},
+        %{type: :start_object},
+        %{type: :key, key: "name"},
+        %{type: :primitive, value: "Alice"},
+        %{type: :key, key: "age"},
+        %{type: :primitive, value: 30},
+        %{type: :end_object},
+        %{type: :start_object},
+        %{type: :key, key: "name"},
+        %{type: :primitive, value: "Bob"},
+        %{type: :key, key: "age"},
+        %{type: :primitive, value: 25},
+        %{type: :end_object},
+        %{type: :end_array},
+        %{type: :end_object}
+      ]
+    end
+
+    test "decode root primitive emits single primitive event" do
+      events = Toon.decode_stream_sync(["Hello World"]) |> Enum.to_list()
+      assert events == [%{type: :primitive, value: "Hello World"}]
+    end
+
+    test "decode root array emits array events" do
+      lines = String.split("[2]:\n  - Apple\n  - Banana", "\n")
+      events = Toon.decode_stream_sync(lines) |> Enum.to_list()
+
+      assert events == [
+        %{type: :start_array, length: 2},
+        %{type: :primitive, value: "Apple"},
+        %{type: :primitive, value: "Banana"},
+        %{type: :end_array}
+      ]
+    end
+
+    test "decode empty input emits empty object" do
+      events = Toon.decode_stream_sync([]) |> Enum.to_list()
+      assert events == [%{type: :start_object}, %{type: :end_object}]
+    end
+
+    test "strict mode raises on length mismatch" do
+      lines = String.split("items[2]:\n  - Apple", "\n")
+      assert_raise Toon.DecodeError, fn ->
+        Toon.decode_stream_sync(lines, strict: true) |> Enum.to_list()
+      end
+    end
+
+    test "non-strict mode allows count mismatch" do
+      lines = String.split("items[2]:\n  - Apple", "\n")
+      events = Toon.decode_stream_sync(lines, strict: false) |> Enum.to_list()
+      assert is_list(events)
+      assert hd(events) == %{type: :start_object}
+    end
+  end
+
+  describe "event_builder: build_value_from_events/1" do
+    # Tests Toon.Decoder.EventBuilder directly
+
+    test "builds object from events" do
+      events = [
+        %{type: :start_object},
+        %{type: :key, key: "name"},
+        %{type: :primitive, value: "Alice"},
+        %{type: :key, key: "age"},
+        %{type: :primitive, value: 30},
+        %{type: :end_object}
+      ]
+
+      assert Toon.Decoder.EventBuilder.build(events) == %{"name" => "Alice", "age" => 30}
+    end
+
+    test "builds nested object from events" do
+      events = [
+        %{type: :start_object},
+        %{type: :key, key: "user"},
+        %{type: :start_object},
+        %{type: :key, key: "name"},
+        %{type: :primitive, value: "Alice"},
+        %{type: :end_object},
+        %{type: :end_object}
+      ]
+
+      assert Toon.Decoder.EventBuilder.build(events) == %{"user" => %{"name" => "Alice"}}
+    end
+
+    test "builds array from events" do
+      events = [
+        %{type: :start_array, length: 3},
+        %{type: :primitive, value: 1},
+        %{type: :primitive, value: 2},
+        %{type: :primitive, value: 3},
+        %{type: :end_array}
+      ]
+
+      assert Toon.Decoder.EventBuilder.build(events) == [1, 2, 3]
+    end
+
+    test "builds primitive from single event" do
+      assert Toon.Decoder.EventBuilder.build([%{type: :primitive, value: "Hello"}]) == "Hello"
+    end
+
+    test "raises on incomplete event stream" do
+      events = [%{type: :start_object}, %{type: :key, key: "name"}]
+      assert_raise Toon.DecodeError, ~r/incomplete/i, fn ->
+        Toon.Decoder.EventBuilder.build(events)
+      end
+    end
+  end
+
+  describe "decode_from_lines/2" do
+    test "produces same result as decode/2" do
+      input = "name: Alice\nage: 30\nscores[3]: 95, 87, 92"
+      {:ok, from_string} = Toon.decode(input)
+      {:ok, from_lines} = Toon.decode_from_lines(String.split(input, "\n"))
+      assert from_lines == from_string
+    end
+
+    test "supports expand_paths option" do
+      lines = String.split("user.name: Alice\nuser.age: 30", "\n")
+      assert {:ok, result} = Toon.decode_from_lines(lines, expand_paths: :safe)
+      assert result == %{"user" => %{"name" => "Alice", "age" => 30}}
+    end
+
+    test "handles complex nested structures with lists" do
+      input = """
+      users[2]:
+        - name: Alice
+          scores[3]: 95, 87, 92
+        - name: Bob
+          scores[3]: 88, 91, 85
+      """ |> String.trim_trailing()
+
+      {:ok, from_string} = Toon.decode(input)
+      {:ok, from_lines} = Toon.decode_from_lines(String.split(input, "\n"))
+
+      assert from_lines == from_string
+      assert from_lines == %{
+        "users" => [
+          %{"name" => "Alice", "scores" => [95, 87, 92]},
+          %{"name" => "Bob", "scores" => [88, 91, 85]}
+        ]
+      }
+    end
+
+    test "handles tabular arrays" do
+      input = """
+      users[3]{name,age,city}:
+        Alice, 30, NYC
+        Bob, 25, LA
+        Charlie, 35, SF
+      """ |> String.trim_trailing()
+
+      {:ok, result} = Toon.decode_from_lines(String.split(input, "\n"))
+
+      assert result == %{
+        "users" => [
+          %{"name" => "Alice", "age" => 30, "city" => "NYC"},
+          %{"name" => "Bob", "age" => 25, "city" => "LA"},
+          %{"name" => "Charlie", "age" => 35, "city" => "SF"}
+        ]
+      }
+    end
+  end
+
+  describe "streaming equivalence" do
+    @test_cases [
+      {"simple object", "name: Alice\nage: 30"},
+      {"nested objects", "user:\n  profile:\n    name: Alice\n    age: 30"},
+      {"mixed structures", "name: Alice\nscores[3]: 95, 87, 92\naddress:\n  city: NYC\n  zip: 10001"},
+      {"list array with objects", "users[2]:\n  - name: Alice\n    age: 30\n  - name: Bob\n    age: 25"},
+      {"root primitive number", "42"},
+      {"root primitive string", "Hello World"},
+      {"root primitive boolean", "true"},
+      {"root primitive null", "null"}
+    ]
+
+    for {name, input} <- @test_cases do
+      @input input
+      test "decode_from_lines matches decode for: #{name}" do
+        {:ok, from_string} = Toon.decode(@input)
+        {:ok, from_lines} = Toon.decode_from_lines(String.split(@input, "\n"))
+        assert from_lines == from_string
+      end
+    end
+  end
+end
+```
+
+---
+
+#### `test/toon/encode_lines_test.exs` (port of `encodeLines.test.ts`)
+
+Tests `Toon.encode_lines/2` line-streaming contract.
+
+```elixir
+defmodule Toon.EncodeLinesTest do
+  use ExUnit.Case, async: true
+
+  test "yields lines without newline characters" do
+    value = %{"name" => "Alice", "age" => 30, "city" => "Paris"}
+    lines = Toon.encode_lines(value) |> Enum.to_list()
+
+    for line <- lines do
+      refute String.contains?(line, "\n"),
+        "Expected line to not contain newline, got: #{inspect(line)}"
+    end
+  end
+
+  test "yields zero lines for empty map" do
+    lines = Toon.encode_lines(%{}) |> Enum.to_list()
+    assert lines == []
+  end
+
+  test "is enumerable with Enum.each" do
+    value = %{"x" => 10, "y" => 20}
+    collected = Toon.encode_lines(value) |> Enum.to_list()
+
+    assert length(collected) == 2
+    # Maps encode in sorted key order
+    assert collected == ["x: 10", "y: 20"]
+  end
+
+  test "lines have no trailing whitespace" do
+    value = %{
+      "user" => %{
+        "name" => "Alice",
+        "tags" => ["a", "b"],
+        "nested" => %{"deep" => "value"}
+      }
+    }
+    lines = Toon.encode_lines(value) |> Enum.to_list()
+
+    for line <- lines do
+      refute String.match?(line, ~r/\s$/),
+        "Expected line to have no trailing whitespace, got: #{inspect(line)}"
+    end
+  end
+
+  test "yields correct number of lines for flat object" do
+    lines = Toon.encode_lines(%{"a" => 1, "b" => 2, "c" => 3}) |> Enum.to_list()
+    assert length(lines) == 3
+  end
+
+  test "joining lines with newline equals encode result" do
+    value = %{"name" => "Alice", "scores" => [1, 2, 3]}
+    {:ok, encoded} = Toon.encode(value)
+    from_lines = Toon.encode_lines(value) |> Enum.join("\n")
+    assert from_lines == encoded
+  end
+end
+```
+
+---
+
+#### `test/toon/normalization_test.exs` (port of `normalization.test.ts`, adapted for Elixir)
+
+TypeScript-specific types (BigInt, Date object, Set, Map, Symbol, undefined, function) map to
+Elixir-specific types. Each behaviour is documented below.
+
+| TypeScript type | Elixir equivalent | Expected TOON output |
+|---|---|---|
+| `BigInt` (safe) | `integer()` | native integer — no change needed |
+| `BigInt` (unsafe, > MAX_SAFE_INT) | large integer (Elixir arbitrary precision) | canonical decimal string literal |
+| `Date` object | `DateTime.t()` | quoted ISO 8601 string via `Toon.Encodable` |
+| `Set` | `MapSet.t()` | encoded as list via `Toon.Encodable` |
+| `Map` | `%{}` or keyword list | plain map encoding |
+| `undefined` / `function` / `Symbol` | no Elixir equivalent — use `:undefined` atom | `"null"` (atoms normalize to strings; `:undefined` → `"undefined"` — NOT null) |
+| `NaN` / `Infinity` | `:nan`, `:infinity`, `:neg_infinity` atoms | `"null"` |
+| `-0` float | `-0.0` | `"0"` (normalized) |
+| `toJSON()` method | `Toon.Encodable` protocol | resolved to protocol output |
+
+```elixir
+defmodule Toon.NormalizationTest do
+  use ExUnit.Case, async: true
+
+  # Elixir integers are arbitrary precision — always encode as canonical decimal
+  describe "integer normalization" do
+    test "encodes small integer normally" do
+      assert {:ok, "123"} = Toon.encode(123)
+    end
+
+    test "encodes large integer as canonical decimal (no scientific notation)" do
+      assert {:ok, result} = Toon.encode(9_007_199_254_740_992)
+      assert result == "9007199254740992"
+    end
+
+    test "encodes very large integer as canonical decimal" do
+      assert {:ok, result} = Toon.encode(12_345_678_901_234_567_890)
+      assert result == "12345678901234567890"
+    end
+  end
+
+  describe "float normalization" do
+    test "encodes normal float" do
+      assert {:ok, "3.14"} = Toon.encode(3.14)
+    end
+
+    test "normalizes -0.0 to 0" do
+      assert {:ok, "0"} = Toon.encode(-0.0)
+    end
+
+    test "normalizes :infinity to null" do
+      # Elixir represents infinity as :infinity atom (from :math); encode must map to null
+      assert {:ok, "null"} = Toon.encode(:infinity)
+    end
+
+    test "normalizes :neg_infinity to null" do
+      assert {:ok, "null"} = Toon.encode(:neg_infinity)
+    end
+
+    test "normalizes :nan to null" do
+      assert {:ok, "null"} = Toon.encode(:nan)
+    end
+  end
+
+  describe "MapSet normalization (analogous to JS Set)" do
+    test "encodes MapSet as sorted list" do
+      # MapSet has no defined order; sort before encoding for determinism
+      input = MapSet.new(["a", "b", "c"])
+      assert {:ok, result} = Toon.encode(input)
+      {:ok, decoded} = Toon.decode(result)
+      assert Enum.sort(decoded) == ["a", "b", "c"]
+    end
+
+    test "encodes empty MapSet as empty array" do
+      assert {:ok, "[0]:"} = Toon.encode(MapSet.new())
+    end
+  end
+
+  describe "DateTime normalization (analogous to JS Date)" do
+    test "encodes DateTime as quoted ISO 8601 string via Toon.Encodable" do
+      dt = ~U[2025-01-01 00:00:00Z]
+      assert {:ok, result} = Toon.encode(dt)
+      assert result == ~s("2025-01-01T00:00:00Z")
+    end
+
+    test "encodes Date as quoted ISO 8601 string" do
+      d = ~D[2025-11-05]
+      assert {:ok, result} = Toon.encode(d)
+      assert result == ~s("2025-11-05")
+    end
+  end
+
+  describe "nil normalization" do
+    test "encodes nil as null" do
+      assert {:ok, "null"} = Toon.encode(nil)
+    end
+  end
+
+  describe "Toon.Encodable protocol (analogous to toJSON method)" do
+    defmodule TestStruct do
+      defstruct [:data]
+    end
+
+    defimpl Toon.Encodable, for: TestStruct do
+      def to_toon(%{data: data}), do: %{"info" => data}
+    end
+
+    test "calls Toon.Encodable.to_toon/1 when implemented" do
+      struct = %TestStruct{data: "example"}
+      assert {:ok, result} = Toon.encode(struct)
+      assert result == "info: example"
+    end
+
+    test "protocol returning a primitive encodes as primitive" do
+      defmodule PrimitiveStruct do
+        defstruct [:value]
+      end
+
+      defimpl Toon.Encodable, for: PrimitiveStruct do
+        def to_toon(_), do: "custom-string"
+      end
+
+      assert {:ok, "custom-string"} = Toon.encode(%PrimitiveStruct{value: 42})
+    end
+
+    test "protocol returning a list encodes as array" do
+      defmodule ListStruct do
+        defstruct [:items]
+      end
+
+      defimpl Toon.Encodable, for: ListStruct do
+        def to_toon(%{items: items}), do: items
+      end
+
+      assert {:ok, "[3]: a,b,c"} = Toon.encode(%ListStruct{items: ["a", "b", "c"]})
+    end
+
+    test "protocol applied to nested struct in object" do
+      defmodule NestedStruct do
+        defstruct [:secret]
+      end
+
+      defimpl Toon.Encodable, for: NestedStruct do
+        def to_toon(_), do: %{"public" => "visible"}
+      end
+
+      input = %{"nested" => %NestedStruct{secret: "hidden"}, "other" => "value"}
+      assert {:ok, result} = Toon.encode(input)
+      assert result == "nested:\n  public: visible\nother: value"
+    end
+
+    test "protocol applied to structs inside array elements" do
+      defmodule RowStruct do
+        defstruct [:data]
+      end
+
+      defimpl Toon.Encodable, for: RowStruct do
+        def to_toon(%{data: d}), do: %{"transformed" => "#{d}-transformed"}
+      end
+
+      arr = [%RowStruct{data: "first"}, %RowStruct{data: "second"}]
+      assert {:ok, result} = Toon.encode(arr)
+      assert result == "[2]{transformed}:\n  first-transformed\n  second-transformed"
+    end
+  end
+end
+```
+
+---
+
+#### `test/toon/replacer_test.exs` (port of `replacer.test.ts`)
+
+Tests the `replacer:` option — a callback `(key, value, path) -> value | :skip` applied during
+encoding. `nil` return keeps the value; `:skip` atom omits the key (analogous to JS `undefined`).
+
+```elixir
+defmodule Toon.ReplacerTest do
+  use ExUnit.Case, async: true
+
+  describe "basic filtering" do
+    test "removes properties by returning :skip" do
+      input = %{"name" => "Alice", "password" => "secret", "email" => "alice@example.com"}
+      replacer = fn key, _value, _path ->
+        if key == "password", do: :skip, else: :keep
+      end
+
+      assert {:ok, result} = Toon.encode(input, replacer: replacer)
+      assert {:ok, decoded} = Toon.decode(result)
+      assert decoded == %{"name" => "Alice", "email" => "alice@example.com"}
+      refute Map.has_key?(decoded, "password")
+    end
+
+    test "removes array elements by returning :skip" do
+      input = [1, 2, 3, 4, 5]
+      replacer = fn _key, value, _path ->
+        if is_integer(value) and rem(value, 2) == 0, do: :skip, else: :keep
+      end
+
+      assert {:ok, result} = Toon.encode(input, replacer: replacer)
+      assert {:ok, decoded} = Toon.decode(result)
+      assert decoded == [1, 3, 5]
+    end
+
+    test "handles deeply nested filtering" do
+      input = %{
+        "users" => [
+          %{"name" => "Alice", "password" => "secret1", "role" => "admin"},
+          %{"name" => "Bob", "password" => "secret2", "role" => "user"}
+        ]
+      }
+      replacer = fn key, _value, _path ->
+        if key == "password", do: :skip, else: :keep
+      end
+
+      assert {:ok, result} = Toon.encode(input, replacer: replacer)
+      assert {:ok, decoded} = Toon.decode(result)
+      assert decoded == %{
+        "users" => [
+          %{"name" => "Alice", "role" => "admin"},
+          %{"name" => "Bob", "role" => "user"}
+        ]
+      }
+    end
+  end
+
+  describe "value transformation" do
+    test "transforms primitive values" do
+      input = %{"name" => "alice", "age" => 30}
+      replacer = fn _key, value, _path ->
+        if is_binary(value), do: {:replace, String.upcase(value)}, else: :keep
+      end
+
+      assert {:ok, result} = Toon.encode(input, replacer: replacer)
+      assert {:ok, decoded} = Toon.decode(result)
+      assert decoded == %{"name" => "ALICE", "age" => 30}
+    end
+
+    test "transforms objects using path" do
+      input = %{"user" => %{"name" => "Alice"}}
+      replacer = fn key, value, path ->
+        if length(path) == 1 and is_map(value) and not is_list(value) do
+          {:replace, Map.put(value, "_id", "#{key}_123")}
+        else
+          :keep
+        end
+      end
+
+      assert {:ok, result} = Toon.encode(input, replacer: replacer)
+      assert {:ok, decoded} = Toon.decode(result)
+      assert Map.has_key?(decoded["user"], "_id")
+      assert decoded["user"]["_id"] == "user_123"
+    end
+
+    test "transforms root value" do
+      input = %{"name" => "Alice"}
+      replacer = fn key, value, _path ->
+        if key == "" do  # root key is empty string
+          {:replace, Map.put(value, "extra", "added")}
+        else
+          :keep
+        end
+      end
+
+      assert {:ok, result} = Toon.encode(input, replacer: replacer)
+      assert {:ok, decoded} = Toon.decode(result)
+      assert decoded["extra"] == "added"
+    end
+  end
+
+  describe "path tracking" do
+    test "path reflects object nesting depth" do
+      paths_seen = :ets.new(:paths, [:set, :public])
+
+      input = %{"a" => %{"b" => %{"c" => "deep"}}}
+      replacer = fn key, value, path ->
+        :ets.insert(paths_seen, {key, path})
+        {:replace, value}
+      end
+
+      Toon.encode(input, replacer: replacer)
+      assert {_, ["a", "b"]} = :ets.lookup(paths_seen, "c") |> hd()
+      :ets.delete(paths_seen)
+    end
+
+    test "path uses integer index for array elements" do
+      paths_seen = :ets.new(:arr_paths, [:set, :public])
+
+      input = %{"items" => ["x", "y", "z"]}
+      replacer = fn key, value, path ->
+        :ets.insert(paths_seen, {key, path})
+        {:replace, value}
+      end
+
+      Toon.encode(input, replacer: replacer)
+      # Array element at index 0 should have path ["items", 0]
+      assert {_, ["items", 0]} = :ets.lookup(paths_seen, "0") |> hd()
+      :ets.delete(paths_seen)
+    end
+  end
+
+  describe "edge cases" do
+    test "replacer returning nil wraps in null" do
+      input = %{"name" => "Alice", "value" => 42}
+      replacer = fn key, _value, _path ->
+        if key == "value", do: {:replace, nil}, else: :keep
+      end
+
+      assert {:ok, result} = Toon.encode(input, replacer: replacer)
+      assert {:ok, decoded} = Toon.decode(result)
+      assert decoded["value"] == nil
+    end
+
+    test "skipping root is a no-op (root cannot be omitted)" do
+      # Per spec: returning :skip for the root key is treated as :keep
+      replacer = fn _key, _value, _path -> :skip end
+      assert {:ok, result} = Toon.encode(%{"a" => 1}, replacer: replacer)
+      # Root object is still emitted, but all keys are skipped — empty object
+      assert {:ok, decoded} = Toon.decode(result)
+      assert decoded == %{}
+    end
+
+    test "no replacer option equals identity replacer" do
+      value = %{"name" => "Alice", "age" => 30}
+      {:ok, without_replacer} = Toon.encode(value)
+      {:ok, with_identity} = Toon.encode(value, replacer: fn _k, _v, _p -> :keep end)
+      assert without_replacer == with_identity
+    end
+  end
+end
+```
+
+> **Note on replacer API design:** The TypeScript replacer returns `undefined` to omit.
+> In Elixir: `:skip` omits, `:keep` keeps unchanged, `{:replace, new_value}` substitutes.
+> This avoids nil/undefined ambiguity and is more explicit.
+
+---
+
 ### Manual Testing
 
 1. `mix deps.get && mix test` — all conformance fixtures pass
@@ -2497,6 +3192,8 @@ Rollback: standard git revert (new package, no breaking changes to existing syst
 ## Acceptance Criteria
 
 - [ ] `mix test` passes all 22 conformance fixture files (decode + encode)
+- [ ] All 4 ported test suites pass: `decode_stream_test.exs`, `encode_lines_test.exs`,
+      `normalization_test.exs`, `replacer_test.exs`
 - [ ] `Toon.encode/2` round-trips with `Toon.decode/2` for all spec examples
 - [ ] Strict mode (`strict: true`) correctly rejects all invalid inputs from `validation-errors.json`
 - [ ] `key_folding: :safe` + `expand_paths: :safe` round-trip losslessly
