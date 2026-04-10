@@ -1,6 +1,6 @@
 # Feature: Elixir TOON Library for Hex.pm
 
-**Status:** 🔴 DRAFT (requires review)
+**Status:** ✅ READY FOR IMPLEMENTATION
 **Priority:** P1 (new library — enables Elixir/Phoenix ecosystem to use TOON for LLM prompts)
 **Estimated Effort:** 40 hours
 **Date:** 2026-04-10
@@ -905,6 +905,112 @@ and Acceptance Criteria (24 testable criteria) are fully verifiable with the tes
 
 ---
 
+### Round 4: Final Compliance Audit
+**Reviewer:** @compliance-auditor
+**Timestamp:** 2026-04-10
+**Cross-Reference:** Reviewed ALL previous rounds (0, 1a, 1b, 2a, 2b, 3a, 3b)
+**Status:** ⚠️ WARNINGS — 2 new violations found and fixed in-place; 1 minor inconsistency noted
+
+**Audit Results:**
+
+**1. Trailing newline — PASS**
+File ends with `\n` (confirmed via `xxd`). Round 0 fix is still present. Notes section
+retains: "All source files must end with a trailing newline (`\n`), per project formatting
+rules."
+
+**2. Russian / non-English text in code blocks — PASS**
+One Cyrillic match found on line 21: the regex literal `` `grep [а-яА-Я]` `` inside a
+backtick inline-code span within the Round 0 prose. This is a quoted shell example inside
+the review narrative — it is NOT Cyrillic text inside any fenced code block. Zero Cyrillic
+characters appear in any ```` ``` ```` fenced code block.
+
+**3. GitHub Issue #1 reference — PASS**
+`**GitHub Issue:** #1` present in the file header.
+
+**4. Status header — PASS (updated below)**
+Was `🔴 DRAFT` — updated to `✅ READY FOR IMPLEMENTATION` after all violations are fixed.
+
+**5. Conventional Commits format — PASS (with 1 minor inconsistency)**
+All 15 commit messages use Conventional Commits prefixes (`feat:`, `chore:`, `test:`,
+`docs:`). One minor inconsistency: line 2352 uses
+`"chore: init mix project (KirillTemnov/elixir-toon#1)"` — the full repo path reference
+instead of the `(#1)` shorthand used by all other commits. This is harmless (GitHub parses
+both), but inconsistent. Not fixed — it is a workflow note, not a spec requirement.
+
+**6. Elixir naming conventions — PASS**
+Modules PascalCase (`Toon`, `Toon.Encodable`, `Toon.DecodeError`, `Toon.Encoder.Core`).
+Functions snake_case (`encode/2`, `decode_from_lines/2`, `needs_quoting?/2`,
+`ambiguous_sign_prefix?/1`). Files snake_case (`decode_error.ex`, `string_utils.ex`).
+No violations.
+
+**7. Stale `Toon.Encoder` protocol name — PASS**
+All three remaining occurrences of `Toon.Encoder` in the document are inside the Round 1a,
+Round 1b, and Round 2a review narrative prose (historical descriptions of what was renamed).
+None appear in spec sections, code blocks, or the Solution body. No violation.
+
+**8. `{:ok, _}` / result-tuple consistency — PASS**
+All encode/decode test assertions use `{:ok, result} = Toon.encode(...)` or
+`{:ok, value} = Toon.decode(...)`. The Round 2a CRITICAL fix is correctly applied
+throughout the unit test section.
+
+**9. NEW VIOLATION FOUND AND FIXED — Incorrect tuple-list syntax (Round 3a regression)**
+
+   **Location:** Unit Tests section — "encodes keyword list in declaration order" test.
+   **Problem:** Line used `input = [{"zebra" => 1, "apple" => 2}]` — the `=>` operator
+   creates a map literal, NOT a tuple. A list containing a single map is NOT a tuple-list.
+   `Toon.encode` would encode this as `[{"zebra" => 1, "apple" => 2}]` (a list with one
+   map element) — likely producing a single-element array in TOON, NOT the expected ordered
+   object `"zebra: 1\napple: 2"`. The test assertion would fail at runtime.
+   **Fix:** Changed to `input = [{"zebra", 1}, {"apple", 2}]` — correct Elixir tuple-list
+   syntax using the `,` tuple constructor.
+
+**10. NEW VIOLATION FOUND AND FIXED — Duplicate-key test uses deduplicated map literal (Round 3a regression)**
+
+   **Location:** Unit Tests section — "encode! raises EncodeError on failure" test.
+   **Problem:** `Toon.encode!(%{"dup" => 1, "dup" => 2})` — Elixir map literals with
+   duplicate keys are deduplicated by the compiler at parse time (last value wins). The
+   resulting runtime value is `%{"dup" => 2}` — a valid single-key map. `encode!` would
+   succeed without raising, making the test fail (expected `EncodeError`, got a binary).
+   **Fix:** Changed to `Toon.encode!([{"dup", 1}, {"dup", 2}])` — a binary-key tuple-list
+   with a genuine duplicate key that survives to runtime and triggers
+   `Toon.EncodeError{reason: :duplicate_key}` during normalize.
+
+**11. `@fallback_to_any` absent — PASS**
+Round 1b fix confirmed: `Toon.Encodable` protocol definition shows `@spec to_toon(struct())`
+without `@fallback_to_any`. Normalize dispatches to the protocol only via `is_struct(value)`
+guard.
+
+**12. `decode_stream/2` absent — PASS**
+Not present in public API. `decode_from_lines/2` covers the lazy-source use case. The
+`decode_stream/2` deferral note is present.
+
+**13. LICENSE in Files to Create — PASS**
+Round 1b fix confirmed: `LICENSE` is listed in the Files to Create tree.
+
+**14. Fixture pinning — PASS**
+`test/fixtures/SPEC_COMMIT.txt` is in the Files to Create tree. The Testing section
+documents the pinning requirement.
+
+**15. `mix.exs` `:files` key — PASS**
+Round 2b fix confirmed: `files: ~w(lib mix.exs README.md CHANGELOG.md LICENSE .formatter.exs)`
+is present in `package/0`.
+
+**16. `decode/2` fallback clause — PASS**
+Round 2b fix confirmed: fallback clause returning
+`{:error, %Toon.DecodeError{reason: :invalid_input}}` is present in the Step 9 sample.
+
+**Changes Made in Round 4:**
+1. Fixed "encodes keyword list in declaration order" test: `[{"zebra" => 1, "apple" => 2}]`
+   → `[{"zebra", 1}, {"apple", 2}]` (correct tuple-list syntax).
+2. Fixed "encode! raises EncodeError on failure" test: `%{"dup" => 1, "dup" => 2}`
+   → `[{"dup", 1}, {"dup", 2}]` (avoids compile-time map deduplication).
+3. Updated TZ status header from `🔴 DRAFT` to `✅ READY FOR IMPLEMENTATION`.
+4. Added Pre-Implementation Testing Checklist section at end of document.
+
+**Final Verdict:** ✅ READY FOR IMPLEMENTATION
+
+---
+
 ## Problem
 
 There is no Elixir implementation of the TOON format (Token-Oriented Object Notation). The
@@ -1620,7 +1726,7 @@ describe "Toon.encode/2 — basic encoding" do
 
   test "encodes keyword list in declaration order" do
     # Keyword lists preserve insertion order; should not be sorted.
-    input = [{"zebra" => 1, "apple" => 2}]  # via tuple list
+    input = [{"zebra", 1}, {"apple", 2}]  # binary-key tuple list
     assert {:ok, result} = Toon.encode(input)
     assert result == "zebra: 1\napple: 2"  # Order preserved, not sorted
   end
@@ -2025,7 +2131,9 @@ describe "Toon.encode!/2 and Toon.decode!/2" do
 
   test "encode! raises EncodeError on failure" do
     assert_raise Toon.EncodeError, fn ->
-      Toon.encode!(%{"dup" => 1, "dup" => 2})  # Would error via encoding
+      # Map literals with duplicate keys are deduplicated at compile time in Elixir.
+      # Use tuple-list form so duplicate keys survive to runtime encoding.
+      Toon.encode!([{"dup", 1}, {"dup", 2}])
     end
   end
 
@@ -2449,3 +2557,85 @@ Rollback: standard git revert (new package, no breaking changes to existing syst
 
 > Note: `encode!/2`, `decode!/2`, and the `Toon.Encodable` protocol were moved from
 > Follow-up into the v0.1 Solution per Round 1a architecture review.
+
+## Pre-Implementation Testing Requirements
+
+**THESE CHECKS MUST BE COMPLETED AFTER IMPLEMENTATION, BEFORE PUBLISHING TO HEX.PM!**
+
+### 1. Run All Tests
+
+```bash
+mix test
+# Expected: 0 failing tests
+```
+
+### 2. Static Analysis
+
+```bash
+mix dialyzer
+# Expected: no type errors
+
+mix credo --strict
+# Expected: no issues (add {:credo, "~> 1.7", only: [:dev, :test], runtime: false} to deps if needed)
+```
+
+### 3. Build Verification
+
+```bash
+mix hex.build
+# Expected: package builds without warnings
+# Verify: only lib/, mix.exs, README.md, CHANGELOG.md, LICENSE, .formatter.exs included
+# (test/fixtures/ 22 JSON files must NOT appear in the package file list)
+```
+
+### 4. Documentation
+
+```bash
+mix docs
+# Expected: docs generated without warnings
+# Verify: all public functions documented (Toon.encode/2, encode!/2, decode/2, decode!/2,
+#          encode_lines/2, decode_from_lines/2, Toon.DecodeError, Toon.EncodeError,
+#          Toon.Encodable)
+```
+
+### 5. Compilation Strictness
+
+```bash
+mix compile --warnings-as-errors
+# Expected: 0 warnings
+```
+
+### 6. Quick-Start Smoke Test
+
+```bash
+iex -S mix
+```
+
+```elixir
+# Verify basic encode round-trip
+iex> {:ok, encoded} = Toon.encode(%{"greeting" => "hello", "count" => 3})
+iex> {:ok, decoded} = Toon.decode(encoded)
+iex> decoded == %{"greeting" => "hello", "count" => 3}
+true
+
+# Verify streaming
+iex> Toon.encode_lines(%{"x" => 1}) |> Enum.to_list()
+["x: 1"]
+
+# Verify error path
+iex> {:error, %Toon.DecodeError{reason: :invalid_input}} = Toon.decode(:not_a_string)
+{:error, %Toon.DecodeError{reason: :invalid_input, ...}}
+```
+
+### 7. Sign-Off Checklist
+
+- [ ] All 22 conformance fixture tests pass (`mix test test/toon/conformance_test.exs`)
+- [ ] Full test suite passes with 0 failures (`mix test`)
+- [ ] `mix dialyzer` clean (no type errors)
+- [ ] `mix credo --strict` clean (or documented exceptions)
+- [ ] `mix hex.build` succeeds with correct file list (no test fixtures in package)
+- [ ] `mix docs` generates without warnings; all public functions have docs
+- [ ] `mix compile --warnings-as-errors` produces 0 warnings
+- [ ] README quick-start example works in `iex -S mix`
+- [ ] `test/fixtures/SPEC_COMMIT.txt` present with pinned SHA
+- [ ] `mix hex.search toon` run to verify package name availability before first publish
