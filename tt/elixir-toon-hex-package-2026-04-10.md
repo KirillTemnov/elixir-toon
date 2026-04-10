@@ -362,6 +362,160 @@ fixed in-place.
 
 ---
 
+### Round 2a: Implementation Review (Independent)
+**Reviewer:** @implementation-expert-alpha
+**Timestamp:** 2026-04-10
+**Status:** ❌ BLOCKERS — 6 bugs that would prevent compilation or produce wrong results; fixed in-place.
+
+**Findings:**
+
+- ✅ LGTM: `mix.exs` dep versions are correct — `ex_doc ~> 0.34`, `dialyxir ~> 1.4`,
+  `jason ~> 1.4` are all current stable releases. `only:` scoping is correct.
+- ✅ LGTM: `defexception` is the right macro for `DecodeError` and `EncodeError`. Implementing
+  `Exception` means `raise err` in the `!` bang variants works correctly.
+- ✅ LGTM: `Keyword.validate!/2` gating at each public entry point (1.13+, present in 1.15)
+  is idiomatic and self-documenting.
+- ✅ LGTM: CRLF normalization via `String.replace("\r\n", "\n")` before `String.split("\n")`
+  is correct. Covers Windows-originated input.
+- ✅ LGTM: `decode/2` guard `when is_binary(input)` prevents silent coercion on wrong types.
+- ✅ LGTM: `Toon.Encodable` protocol definition — no `@fallback_to_any`, dispatch only on
+  `is_struct/1` in Normalize — correctly avoids the ~5x perf regression from Round 1b.
+- ✅ LGTM: `Toon.Constants.delimiters/0` returns a map with charlist integer values —
+  `?,` = 44, `?\t` = 9, `?|` = 124. These are correct BEAM integer literals.
+- ✅ LGTM: Scanner emitting `%ParsedLine{}` structs and Parser emitting tagged maps for
+  events is a sound event-sourced approach for the grammar.
+- ✅ LGTM: `decode_from_lines/2` accepting `Enumerable.t()` covers both
+  `File.stream!/1` and in-memory list inputs with a single function — good design.
+
+- ❌ CRITICAL (FIXED): **Unit tests assert `encode/2` returns a bare string, but `encode/2`
+  now returns `{:ok, String.t()} | {:error, EncodeError.t()}`.** After the Round 1b change
+  making `encode/2` a result-tuple function, every test doing
+  `assert Toon.encode(...) == "..."` will fail at runtime — the left side is `{:ok, "..."}`
+  not `"..."`. All unit tests in the Testing section compare the wrong shape.
+  **Fix:** Rewrite all encode test assertions to match `{:ok, _}` tuples using
+  pattern-match `assert {:ok, result} = Toon.encode(...)` + `assert result == "..."`,
+  or the single-line form `assert Toon.encode(...) == {:ok, "..."}`.
+
+- ❌ CRITICAL (FIXED): **`encode/2` catches `EncodeError` via `rescue` but lets
+  `ArgumentError` from `Keyword.validate!/2` propagate unhandled inside the tuple
+  contract.** `Keyword.validate!/2` raises `ArgumentError` on unknown keys. The call
+  is INSIDE the `try` block, so an unknown option raises through `rescue e in
+  EncodeError` (which only matches `EncodeError`), making `ArgumentError` escape as a
+  bare exception — breaking the `{:ok, _} | {:error, _}` contract.
+  **Fix:** Move `Keyword.validate!/2` OUTSIDE the `try` block. Option validation is a
+  programmer error (wrong option key), not a runtime encode failure — callers should
+  see `ArgumentError` directly, not wrapped in `{:error, _}`. The `try/rescue` block
+  should wrap ONLY the `encode_value` dispatch.
+
+- ❌ CRITICAL (FIXED): **`@derive {Toon.Encodable, only: [:id, :name]}` will not work.**
+  Elixir's `@derive` macro calls `Protocol.__derive__/3` which invokes
+  `Toon.Encodable.__deriving__/3` (a macro) on the protocol module. `defprotocol` does
+  NOT generate `__deriving__/3` automatically — it must be explicitly implemented as a
+  macro inside the protocol body or in a companion module. Without it, the `@derive`
+  call raises `** (Protocol.UndefinedError) protocol Toon.Encodable not implemented`.
+  **Fix:** Either (a) document that `@derive` is NOT supported in v0.1 (users implement
+  `defimpl Toon.Encodable, for: MyStruct` manually), or (b) add a `defmacro
+  __deriving__(module, struct, opts)` implementation to `Toon.Encodable`. Option (a) is
+  correct for v0.1 scope. Remove the `@derive` example from the TZ; replace with a
+  manual `defimpl` example.
+
+- ❌ CRITICAL (FIXED): **`encode_lines/2` and `decode_from_lines/2` are declared as
+  function stubs with no body — they will not compile.** In Elixir, a function clause
+  without a `do` block is a forward declaration (used for default args with multiple
+  clauses), but it MUST be followed by at least one clause WITH a body. As written,
+  `def encode_lines(input, opts \\ [])` with no subsequent `do` body is a compile error.
+  **Fix:** Replace the stub declarations with documented placeholder bodies (or note
+  clearly that the stub form requires a companion `do`-body clause in the actual
+  implementation file). In the TZ code sample, add a `# implementation` comment inside
+  a `do` block to make the example compilable.
+
+- ❌ CRITICAL (FIXED): **Acceptance criterion still references the old `Toon.Encoder`
+  protocol name** (line "Custom structs encoded via `Toon.Encoder` protocol") — this
+  was renamed to `Toon.Encodable` in Round 1b but the acceptance criterion was not
+  updated. **Fix:** Update to `Toon.Encodable`.
+
+- ❌ CRITICAL (FIXED): **Follow-up note at end of file references `Toon.Encoder`
+  protocol** ("the `Toon.Encoder` protocol were moved from Follow-up") — stale
+  Round 1a name. **Fix:** Update to `Toon.Encodable`.
+
+- ⚠️ ISSUE (FIXED): **`encode/2` calls `IO.iodata_to_binary/1` on the result of
+  `encode_value/3`, but neither the spec nor the module description states that
+  `encode_value/3` returns `iodata()`.** If `encode_value/3` returns `String.t()`, the
+  `IO.iodata_to_binary/1` call is a no-op (harmless but misleading). If it returns
+  `iodata()`, the typespec for `Encoder.Core` must say so.
+  **Fix:** Add an explicit note to Step 5 that `encode_value/3` returns `iodata()`
+  (a list of binaries/charlists) for efficiency, and `IO.iodata_to_binary/1` in
+  `encode/2` is the intended flattening step.
+
+- ⚠️ ISSUE (FIXED): **`Toon.Decoder.Core` is listed in the module table but its
+  responsibility is never described** in the Implementation steps. Steps 6–8 cover
+  Scanner, Parser+EventBuilder, and StrictMode. `Toon.Decoder.Core` (the internal
+  decode entry point) has no corresponding step explaining what it contains or how it
+  orchestrates the pipeline (Scanner → Parser → EventBuilder → StrictMode). Implementer
+  will not know where to put the `decode_from_lines/2` body.
+  **Fix:** Add a brief Step 7b (or expand Step 7) describing `Toon.Decoder.Core` as
+  the pipeline orchestrator: accepts `[String.t()]`, invokes Scanner, feeds ParsedLines
+  to Parser, feeds events to EventBuilder, runs StrictMode if `strict: true`, returns
+  `{:ok, json_value()} | {:error, DecodeError.t()}`.
+
+- ⚠️ ISSUE (FIXED): **`needs_quoting?/2` calls `starts_with_hyphen?/1` — the name is
+  misleading and the logic would over-quote valid negative numbers.** A string like
+  `"-3.14"` is a valid unquoted TOON primitive (it decodes as a float). Only strings
+  starting with `-` that are NOT valid numbers should be quoted. The function name
+  `starts_with_hyphen?` implies ALL hyphen-prefixed strings are quoted, which conflicts
+  with §7.2 of the spec (negative numbers are unquoted scalars). **Fix:** Rename to
+  `ambiguous_sign_prefix?/1` (or `non_numeric_hyphen_prefix?/1`) and document that it
+  returns true only when the string starts with `-` but is not a valid number literal.
+
+- ⚠️ ISSUE (FIXED): **`@type encode_opts` uses `pos_integer()` for `indent:`** but
+  an indent of `0` (no indentation) is a reasonable and valid option. `pos_integer()`
+  excludes zero. Standard Elixir libraries (Poison, Jason) type this as
+  `non_neg_integer()`. **Fix:** Change `indent: pos_integer()` to
+  `indent: non_neg_integer()` in the typespec.
+
+- 💡 CODE SMELL (FIXED): **`@type delimiter :: ?, | ?\t | ?|` in `Toon.Constants` is
+  misleading** — these are integer character codes (44, 9, 124), not Elixir character
+  literals in the typespec sense. The `@type` declaration looks like an OR of three
+  integer literals, which is valid Dialyzer syntax but reads confusingly.
+  The matching type alias in `Toon.Constants` makes the delimiter charcode type
+  cleaner as `@type delimiter :: 44 | 9 | 124` with a companion comment. However this
+  is a style concern, not a bug — left as a note for implementer.
+
+- 💡 CODE SMELL (NOTED): **`Toon.Constants.delimiters/0` returns a map, but the
+  accepted option value for `delimiter:` is an atom (`:comma | :tab | :pipe`).** The
+  map is used for atom-to-charcode lookup. This is correct but the function name
+  `delimiters/0` (plural, bare) does not convey it's a lookup table. `delimiter_map/0`
+  or `delimiter_codes/0` would be clearer. Left as style note.
+
+- 💡 CODE SMELL (NOTED): **Conformance test uses `fixture["category"]` INSIDE the
+  test name string**, but `fixture["category"]` at compile time is the same as the
+  outer `category` variable from the `for` loop (both come from the same fixture JSON).
+  This produces redundant test names like `"decode/decode: parses safe unquoted
+  string"`. Consider `"#{fixture_file |> Path.basename(".json")}: #{test_case["name"]}"`
+  for cleaner output. Left as style note — not blocking.
+
+**Changes Made:**
+1. Rewrote all unit test assertions for `encode/2` to use `{:ok, "..."}` result
+   tuple matching (CRITICAL fix).
+2. Moved `Keyword.validate!/2` call outside the `try` block in `encode/2`; `try/rescue`
+   now wraps only `encode_value` dispatch (CRITICAL fix).
+3. Removed `@derive {Toon.Encodable, only: [:id, :name]}` example; replaced with a
+   manual `defimpl Toon.Encodable, for: MyApp.User` example. Added a note that
+   `@derive` is not supported in v0.1 (CRITICAL fix).
+4. Added `do` bodies to the `encode_lines/2` and `decode_from_lines/2` stub
+   declarations in the Step 9 code sample (CRITICAL fix).
+5. Updated acceptance criterion line from `Toon.Encoder` → `Toon.Encodable` (CRITICAL
+   fix).
+6. Updated the trailing Follow-up note: `Toon.Encoder` → `Toon.Encodable` (CRITICAL
+   fix).
+7. Added note to Step 5 that `encode_value/3` returns `iodata()`.
+8. Added Step 7b describing `Toon.Decoder.Core` pipeline orchestration.
+9. Renamed `starts_with_hyphen?` → `ambiguous_sign_prefix?` in the `StringUtils`
+   snippet with a clarifying comment.
+10. Changed `indent: pos_integer()` → `indent: non_neg_integer()` in typespec.
+
+---
+
 ## Problem
 
 There is no Elixir implementation of the TOON format (Token-Oriented Object Notation). The
@@ -595,7 +749,7 @@ Public typespecs live inside `lib/toon.ex` (no separate `Toon.Types` module):
 @type json_value :: json_primitive() | json_object() | json_array()
 
 @type encode_opts :: [
-  indent: pos_integer(),
+  indent: non_neg_integer(),
   delimiter: :comma | :tab | :pipe,
   key_folding: :off | :safe,
   flatten_depth: pos_integer() | :infinity,
@@ -660,13 +814,24 @@ defprotocol Toon.Encodable do
 end
 ```
 
-Example derivation in user code:
+Example implementation in user code (v0.1 does NOT support `@derive`; implement
+the protocol manually):
 ```elixir
 defmodule MyApp.User do
-  @derive {Toon.Encodable, only: [:id, :name]}
   defstruct [:id, :name, :password_hash]
 end
+
+defimpl Toon.Encodable, for: MyApp.User do
+  # Return only the fields safe to encode; exclude sensitive fields.
+  def to_toon(%MyApp.User{id: id, name: name}) do
+    %{"id" => id, "name" => name}
+  end
+end
 ```
+> Note: `@derive {Toon.Encodable, only: [...]}` is **not** supported in v0.1 —
+> `defprotocol` does not auto-generate `__deriving__/3`. Support can be added in
+> a follow-up by implementing `defmacro __deriving__(module, _struct, opts)` inside
+> the protocol body.
 
 **Step 3: Encoder — Normalize**
 
@@ -709,8 +874,14 @@ defmodule Toon.StringUtils do
     str in ["true", "false", "null"] or
     numeric_like?(str) or
     contains_special_chars?(str, active_delimiter) or
-    starts_with_hyphen?(str)
+    ambiguous_sign_prefix?(str)
   end
+
+  # Returns true when the string starts with "-" but is NOT a valid number literal.
+  # Valid negative numbers (e.g. "-3.14", "-0") must NOT be quoted — the encoder
+  # emits them as unquoted scalars per §7.2. Only non-numeric hyphen-prefixed
+  # strings (e.g. "-foo", "--flag") require quoting.
+  @spec ambiguous_sign_prefix?(String.t()) :: boolean()
 
   @spec escape(String.t()) :: String.t()
   def escape(str) do
@@ -722,7 +893,10 @@ end
 **Step 5: Encoder — Core**
 
 `lib/toon/encoder/core.ex` (`@moduledoc false`):
-- `encode_value/3` — dispatch on type
+- `encode_value/3` — dispatch on type; returns `iodata()` (list of binaries/charlists)
+  for efficiency. The public `encode/2` calls `IO.iodata_to_binary/1` to flatten.
+- `encode_lines/2` — entry point for `Toon.encode_lines/2`; wraps `encode_value/3`
+  output in a `Stream` of line binaries.
 - `encode_object/3` — key: value lines with indentation
 - `encode_array/3` — determine form:
   - Primitive array: `key[N]: v1,v2,v3`
@@ -737,6 +911,20 @@ end
 - Parse a line into `%ParsedLine{raw, depth, indent, content, line_number}`
 - Detect array headers via regex matching §6 grammar
 - Extract: key, length, delimiter, fields list
+
+**Step 6b: Decoder — Core (pipeline orchestrator)**
+
+`lib/toon/decoder/core.ex` (`@moduledoc false`):
+- Entry point called by `Toon.decode_from_lines/2` (and `Toon.decode/2` indirectly).
+- `decode_lines/2` orchestrates the pipeline:
+  1. `Toon.Decoder.Scanner.scan_lines/1` — transforms `[String.t()]` into
+     `[%ParsedLine{}]`
+  2. `Toon.Decoder.Parser.parse/1` — transforms `[%ParsedLine{}]` into a list of
+     `JsonStreamEvent` maps
+  3. `Toon.Decoder.EventBuilder.build/1` — transforms events into `json_value()`
+  4. If `strict: true` — runs `Toon.Decoder.StrictMode.validate/2` before returning
+  5. If `expand_paths: :safe` — runs `Toon.Decoder.Expand.expand/1` on the result
+- Returns `{:ok, json_value()} | {:error, %Toon.DecodeError{}}` at each stage.
 
 **Step 7: Decoder — Parser + Event Builder**
 
@@ -781,10 +969,13 @@ defmodule Toon do
 
   @spec encode(term(), encode_opts()) :: {:ok, String.t()} | {:error, EncodeError.t()}
   def encode(input, opts \\ []) do
+    # Validate outside try — unknown option keys are programmer errors (ArgumentError),
+    # not runtime encode failures that belong in the {:error, _} return path.
     opts = Keyword.validate!(opts, [:indent, :delimiter, :key_folding, :flatten_depth, :replacer])
     try do
-      string = input |> Toon.Encoder.Core.encode_value(opts, []) |> IO.iodata_to_binary()
-      {:ok, string}
+      # encode_value/3 returns iodata() for efficiency; flatten here.
+      iodata = Toon.Encoder.Core.encode_value(input, opts, [])
+      {:ok, IO.iodata_to_binary(iodata)}
     rescue
       e in EncodeError -> {:error, e}
     end
@@ -817,11 +1008,20 @@ defmodule Toon do
   end
 
   @spec encode_lines(term(), encode_opts()) :: Enumerable.t()
-  def encode_lines(input, opts \\ [])
+  def encode_lines(input, opts \\ []) do
+    opts = Keyword.validate!(opts, [:indent, :delimiter, :key_folding, :flatten_depth, :replacer])
+    # Returns a lazy Stream of line binaries. Implementation delegates to
+    # Toon.Encoder.Core via Stream.resource/3.
+    Toon.Encoder.Core.encode_lines(input, opts)
+  end
 
   @spec decode_from_lines(Enumerable.t(), decode_opts()) ::
           {:ok, json_value()} | {:error, DecodeError.t()}
-  def decode_from_lines(lines, opts \\ [])
+  def decode_from_lines(lines, opts \\ []) do
+    opts = Keyword.validate!(opts, [:strict, :expand_paths])
+    # Pipeline: scan lines → parse events → build value → strict-mode check.
+    Toon.Decoder.Core.decode_lines(lines, opts)
+  end
 end
 ```
 
@@ -936,24 +1136,34 @@ Use the 22 language-agnostic JSON fixtures from `toon-format/spec/tests/fixtures
 ```elixir
 describe "Toon.encode/2" do
   test "encodes flat object" do
-    assert Toon.encode(%{"name" => "Alice", "age" => 30}) == "name: Alice\nage: 30"
+    # Maps are encoded in sorted-key order (deterministic).
+    assert {:ok, result} = Toon.encode(%{"age" => 30, "name" => "Alice"})
+    assert result == "age: 30\nname: Alice"
   end
 
   test "encodes uniform array as tabular" do
     input = %{"users" => [%{"id" => 1, "name" => "Alice"}, %{"id" => 2, "name" => "Bob"}]}
-    assert Toon.encode(input) == "users[2]{id,name}:\n  1,Alice\n  2,Bob"
+    assert {:ok, result} = Toon.encode(input)
+    assert result == "users[2]{id,name}:\n  1,Alice\n  2,Bob"
   end
 
   test "encodes primitive array inline" do
-    assert Toon.encode(%{"tags" => ["a", "b", "c"]}) == "tags[3]: a,b,c"
+    assert {:ok, result} = Toon.encode(%{"tags" => ["a", "b", "c"]})
+    assert result == "tags[3]: a,b,c"
   end
 
   test "normalizes atom keys" do
-    assert Toon.encode(%{name: "Alice"}) == "name: Alice"
+    assert {:ok, result} = Toon.encode(%{name: "Alice"})
+    assert result == "name: Alice"
   end
 
   test "quotes strings that need quoting" do
-    assert Toon.encode(%{"val" => "true"}) == ~s(val: "true")
+    assert {:ok, result} = Toon.encode(%{"val" => "true"})
+    assert result == ~s(val: "true")
+  end
+
+  test "returns error tuple for unencodable term" do
+    assert {:error, %Toon.EncodeError{reason: :unencodable_term}} = Toon.encode(self())
   end
 end
 
@@ -1043,7 +1253,7 @@ Rollback: standard git revert (new package, no breaking changes to existing syst
 - [ ] Atom-keyed maps normalized correctly in encoder
 - [ ] Keyword lists preserved in original order during encoding
 - [ ] Plain maps encoded with deterministic (sorted-key) output
-- [ ] Custom structs encoded via `Toon.Encoder` protocol (with default `Map.from_struct/1`)
+- [ ] Custom structs encoded via `Toon.Encodable` protocol (with default `Map.from_struct/1`)
 - [ ] `decode/2` returns `{:error, %Toon.DecodeError{line: _, reason: _}}` on bad input
 - [ ] `encode/2` returns `{:ok, String.t()}` on success, `{:error, %Toon.EncodeError{}}` on
       unencodable terms (pids, functions, duplicate keys, etc.)
@@ -1090,5 +1300,5 @@ Rollback: standard git revert (new package, no breaking changes to existing syst
 6. Add property-based round-trip tests via `:stream_data` (generate arbitrary
    `json_value()`, assert `encode |> decode == original`)
 
-> Note: `encode!/2`, `decode!/2`, and the `Toon.Encoder` protocol were moved from
+> Note: `encode!/2`, `decode!/2`, and the `Toon.Encodable` protocol were moved from
 > Follow-up into the v0.1 Solution per Round 1a architecture review.
