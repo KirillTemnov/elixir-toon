@@ -165,6 +165,203 @@
 
 ---
 
+### Round 1b: Architecture Review (Cross-Check)
+**Reviewer:** @architecture-designer-beta
+**Timestamp:** 2026-04-10
+**Cross-Reference:** Reviewed @architecture-designer-alpha findings (Round 1a)
+**Status:** ❌ BLOCKERS — alpha missed a hard naming collision plus several correctness issues;
+fixed in-place.
+
+**Findings:**
+
+- ✅ AGREE: alpha's protocol-not-Jason.Encoder call is correct and well-motivated.
+- ✅ AGREE: alpha's keyword-list-over-map decision matches Elixir stdlib idioms (Jason,
+  Ecto, Phoenix, Plug). No disagreement.
+- ✅ AGREE: dropping `decode_stream/2` from v0.1 is the right call —
+  `decode_from_lines/2` covers the lazy-source use case without leaking parser events.
+- ✅ AGREE: structured `Toon.DecodeError` with line/column/reason is the minimum viable
+  library error contract.
+- ✅ AGREE: `Toon.Decoder.StrictMode` rename resolves the `Validation` clash cleanly.
+
+- ❌ MISSED BY ALPHA — BLOCKER (FIXED): **Hard name collision between
+  `Toon.Encoder` (protocol) and `Toon.Encoder.Core` parent namespace plus
+  `lib/toon/encoder.ex` from Step 5.** Alpha introduced the `Toon.Encoder` protocol
+  in `lib/toon/encoder_protocol.ex` AND Step 5 still said
+  "`lib/toon/encoder.ex` — `encode_value/3`, `encode_object/3`, `encode_array/3`".
+  Both files would define the module `Toon.Encoder` → compile error. Also, using
+  `Toon.Encoder` as BOTH a protocol and the parent of `Toon.Encoder.Core` /
+  `Toon.Encoder.Normalize` / etc. is confusing even if it technically compiles
+  (protocol consolidation works with child namespaces, but it makes
+  `Toon.Encoder.Core` look like it belongs to the protocol).
+  **Fix:** Rename the user-facing protocol to `Toon.Encodable` (mirrors
+  `Jason.Encoder` → "something encodable"). The internal encoder pipeline keeps the
+  `Toon.Encoder.*` namespace. The `encode_value/3` / `encode_object/3` /
+  `encode_array/3` functions move into `Toon.Encoder.Core` (matching the module
+  table — Step 5 was inconsistent with the table). No `lib/toon/encoder.ex` file.
+
+- ❌ MISSED BY ALPHA — BLOCKER (FIXED): **`encode!/2` as a thin alias is wrong.**
+  Alpha's Step 9 defines `def encode!(input, opts \\ []), do: encode(input, opts)`.
+  That makes the bang variant identical to the non-bang variant — which is a lie to
+  the user. The correct semantics are: `encode/2` returns `{:ok, String.t()} |
+  {:error, Toon.EncodeError.t()}`, and `encode!/2` unwraps or raises. Either
+  `encode/2` must return a result tuple (breaking the current spec which says
+  `:: String.t()`), OR there is no `encode!/2` and `encode/2` raises directly on
+  invalid input. **Fix:** Change `encode/2` to return `{:ok, String.t()} |
+  {:error, EncodeError.t()}` to mirror `decode/2`. `encode!/2` unwraps or raises.
+  This is consistent with `Jason.encode/1` vs `Jason.encode!/1` in the Elixir
+  ecosystem. Normalize failures (e.g. a PID, a function, a reference) go through
+  the tuple path.
+
+- ❌ MISSED BY ALPHA — CORRECTNESS (FIXED): **`@fallback_to_any` makes the protocol
+  dispatch on EVERY term, not just structs.** With `@fallback_to_any true` and
+  `defimpl Toon.Encodable, for: Any`, the encoder will invoke protocol dispatch on
+  integers, binaries, lists, atoms, nil — on every single value during normalize.
+  That is both a correctness risk (the `Any` impl calls `Map.from_struct/1` which
+  crashes on non-structs, and the `def to_toon(other), do: other` fallback shadows
+  all primitive paths) and a ~5x perf regression on protocol-hot loops.
+  **Fix:** Normalize dispatches to `Toon.Encodable.to_toon/1` ONLY when
+  `is_struct(value)`. All other terms go through direct pattern-matching in
+  Normalize. The protocol needs no `Any` impl; instead the default struct handling
+  lives in `Normalize.normalize_struct/1` which does
+  `Map.from_struct/1 |> Map.drop([:__meta__])` (Ecto-safe) only if no protocol
+  impl exists — checked via `Toon.Encodable.impl_for(value)`. Drop
+  `@fallback_to_any`.
+
+- ❌ MISSED BY ALPHA — CORRECTNESS (FIXED): **Normalize rule ordering for
+  `[{k, v}, ...]` lists is ambiguous.** Alpha's Step 3 says both
+  "Keyword lists with unique atom keys → ordered string-keyed objects" AND
+  "List of `{binary, value}` tuples → ordered string-keyed objects". These two
+  rules overlap: what about `[{:a, 1}, {"b", 2}]` (mixed keys)? What about
+  `[{"a", 1}, {"a", 2}]` (duplicate keys)? What about `[{1, 2}, {3, 4}]`
+  (numeric-keyed — should be a list of tuples → list of lists, NOT an object)?
+  **Fix:** Add explicit disambiguation rules to Normalize:
+  1. If `Keyword.keyword?/1` returns true AND all keys are unique → object
+     (keys normalized to strings).
+  2. Else if all elements are 2-tuples whose first element is `is_binary/1` AND
+     keys are unique → object.
+  3. Else if all elements are 2-tuples whose first element is `is_binary/1` or
+     `is_atom/1` (mixed) AND keys are unique → object (with atoms stringified).
+  4. Otherwise → list of 2-element lists (tuples → lists, recursively).
+  Duplicate keys in any object-shaped input raise `Toon.EncodeError`
+  `reason: :duplicate_key` with the conflicting key in `path`.
+
+- ❌ MISSED BY ALPHA (FIXED): **No LICENSE file in Files to Create despite
+  `licenses: ["MIT"]` in `mix.exs`.** `mix hex.build` emits a warning when the
+  declared license has no corresponding `LICENSE` / `LICENSE.md` in the package
+  root, and `mix hex.publish` rejects packages missing a license file.
+  **Fix:** Add `LICENSE` (MIT text) to Files to Create. Added to tree.
+
+- ❌ MISSED BY ALPHA (FIXED): **Conformance fixtures are not version-pinned.**
+  The workflow says "download and integrate all 22 JSON fixture files from
+  `toon-format/spec/tests/fixtures/`" but does not pin a commit. The spec repo
+  may update fixtures (`version` field inside each fixture is bumped). Without a
+  pinned revision, `mix test` results become non-deterministic across developer
+  machines and CI runs.
+  **Fix:** Pin fixtures to a specific `toon-format/spec` commit SHA. Record the
+  SHA in `test/fixtures/SPEC_COMMIT.txt` and validate during test setup that the
+  copied fixtures match. Commit fixtures into the repo — do not fetch at test
+  time. Added to Notes and Testing sections.
+
+- ❌ MISSED BY ALPHA (FIXED): **`decode_opts` has `indent:` which is wrong.**
+  Decoders auto-detect indentation from the input (§11 of the spec says
+  "indentation is determined by the first indented line"). A user-supplied
+  `indent` option for decode has no well-defined semantics.
+  **Fix:** Remove `indent:` from `decode_opts`. Keep only `strict:` and
+  `expand_paths:`.
+
+- ❌ MISSED BY ALPHA (FIXED): **CRLF / line-ending handling is unspecified.**
+  `decode/2` uses `String.split("\n")`, which leaves `\r` characters stuck to
+  the end of each line on Windows-originated input. The scanner will then see
+  trailing whitespace on every line and either fail strict-mode checks or
+  produce wrong line numbers in errors.
+  **Fix:** Normalize input in `decode/2`: `input |> String.replace("\r\n", "\n")
+  |> String.split("\n")`. Note added to Step 9.
+
+- ❌ MISSED BY ALPHA (FIXED): **`app: :toon` Hex.pm name may be taken.** Alpha
+  neither verified the package name is available on Hex.pm nor provided a
+  fallback. Publishing will fail if `:toon` is reserved.
+  **Fix:** Add an explicit "name availability check" step to the workflow
+  BEFORE publishing: `mix hex.search toon` and `curl
+  https://hex.pm/api/packages/toon`. Suggested fallback names if taken:
+  `:toon_format`, `:toon_ex`, `:toonex`. Note: the `app:` atom is local and
+  can stay `:toon` even if the published name differs via `package: [name:
+  ...]`. Added to Notes.
+
+- ❌ MISSED BY ALPHA (FIXED): **`Map.drop([:__meta__])` in the default protocol
+  impl is Ecto-specific** and contradicts the stated "keep Jason test-only"
+  principle — if we're going to special-case Ecto's `__meta__`, we're building
+  in an implicit framework dependency. **Fix:** The default struct normalization
+  drops only `:__struct__` via `Map.from_struct/1` (which already drops
+  `:__struct__`). Users with Ecto schemas implement `Toon.Encodable` for their
+  own schemas or use `Ecto.Schema`'s built-in serialization. Removed the Ecto
+  special-case from the protocol impl.
+
+- ❌ MISSED BY ALPHA: **`Path.wildcard/1` at compile time with
+  `@external_resource` does not trigger recompile when NEW fixture files are
+  added, only when listed files change.** This is a well-known Elixir gotcha.
+  Alpha added `@external_resource` per-file but did not flag the
+  "new file added" case.
+  **Fix:** Add `force: true` recompile instructions to README / CI:
+  `touch test/toon/conformance_test.exs && mix test` after adding fixtures.
+  Alternatively, generate a fixture manifest file as a build step. Note added
+  to testing section. Not a blocker — the fixture set is static v3.0.
+
+- ⚠️ CONCERN (NOT FIXED, flagged): **Elixir minimum version 1.15 is more
+  conservative than necessary.** `Keyword.validate!/2` landed in 1.13, the
+  `Stream` improvements alpha cites are from 1.14. If the goal is broad Phoenix
+  compatibility, `elixir: "~> 1.14"` buys one more LTS cycle. Not a blocker;
+  leaving alpha's 1.15 floor alone pending team input.
+
+- ⚠️ CONCERN (NOT FIXED, flagged): **`replacer` callback arity-3 signature
+  copies the TypeScript reference but is non-idiomatic in Elixir.** Elixir
+  callback conventions prefer `{key, value, path}` tuples or a struct argument
+  over positional args with a keypath list. Not a blocker — the reference API
+  traceability argument wins for v0.1.
+
+- 💡 NEW SUGGESTION: **Add a `Toon.Encodable` `@derive` example** to the README
+  so users discover struct support without reading protocol docs. One paragraph,
+  high ROI.
+
+- 💡 NEW SUGGESTION: **Add `CHANGELOG.md`** to Files to Create — ExDoc can
+  display it alongside README via `extras: ["README.md", "CHANGELOG.md"]`.
+  Standard Hex.pm practice.
+
+- 💡 NEW SUGGESTION: **Add a property-based round-trip test via `:stream_data`**
+  (dev/test dep) to catch encoder/decoder asymmetries the fixed fixtures miss.
+  Not required for v0.1, noted as follow-up.
+
+**Changes Made:**
+
+1. Renamed user-facing protocol `Toon.Encoder` → `Toon.Encodable`. Updated module
+   table, Files to Create, Step 2 code sample, and all references.
+2. Removed `lib/toon/encoder.ex` from Step 5; `encode_value/3` / `encode_object/3`
+   / `encode_array/3` now live in `Toon.Encoder.Core` (`lib/toon/encoder/core.ex`),
+   matching the module table.
+3. Changed `encode/2` return type to `{:ok, String.t()} | {:error,
+   Toon.EncodeError.t()}`; rewrote `encode!/2` to unwrap-or-raise (not a thin
+   alias). Updated typespec in `lib/toon.ex` sample and acceptance criteria.
+4. Removed `@fallback_to_any` from `Toon.Encodable` protocol. Normalize now calls
+   `Toon.Encodable.to_toon/1` only when `is_struct(value)`; non-structs go
+   through pattern matching. Default struct handling: `Map.from_struct/1` (no
+   Ecto `__meta__` drop).
+5. Added explicit disambiguation rules for keyword / tuple-list / list-of-lists
+   in the Normalize section, including duplicate-key → `EncodeError` behavior.
+6. Added `LICENSE` to Files to Create; added `CHANGELOG.md` to Files to Create
+   and to `docs: [extras: ...]` in `mix.exs`.
+7. Added fixture version pinning: `test/fixtures/SPEC_COMMIT.txt` records the
+   pinned SHA; Testing section now instructs fixtures to be committed to the
+   repo.
+8. Removed `indent:` from `decode_opts()` — decoders auto-detect indentation.
+9. Added CRLF normalization to `decode/2` (`String.replace("\r\n", "\n")`
+   before split).
+10. Added Hex.pm name-availability check to the Implementation Workflow and a
+    fallback name list (`:toon_format`, `:toon_ex`) to Notes.
+11. Added note about `@external_resource` not catching newly-added fixture files;
+    documented the `touch` workaround in Testing.
+12. Added property-based round-trip testing via `:stream_data` to Follow-up Tasks.
+
+---
+
 ## Problem
 
 There is no Elixir implementation of the TOON format (Token-Oriented Object Notation). The
@@ -248,8 +445,9 @@ Internal helpers are marked `@moduledoc false` and are not part of the public co
 | TypeScript module             | Elixir module                   | Visibility |
 |-------------------------------|---------------------------------|------------|
 | `src/index.ts`                | `Toon` (public API)             | public     |
-| —                             | `Toon.Encoder` (protocol)       | public     |
+| —                             | `Toon.Encodable` (protocol)     | public     |
 | —                             | `Toon.DecodeError` (exception)  | public     |
+| —                             | `Toon.EncodeError` (exception)  | public     |
 | `src/constants.ts`            | `Toon.Constants`                | internal   |
 | `src/encode/normalize.ts`     | `Toon.Encoder.Normalize`        | internal   |
 | `src/encode/encoders.ts`      | `Toon.Encoder.Core`             | internal   |
@@ -275,11 +473,14 @@ Internal helpers are marked `@moduledoc false` and are not part of the public co
    Example: `Toon.encode(value, indent: 4, delimiter: :tab)`. Validated with
    `Keyword.validate!/2`. This matches Jason/Ecto/Phoenix conventions.
 
-2. **Custom struct encoding via a `Toon.Encoder` protocol** (not `Jason.Encoder`).
-   Modeled after `Jason.Encoder`: consumers implement `Toon.Encoder` for their structs
-   to control normalization. Default behavior for any `struct` without an impl is
-   `Map.from_struct/1 |> Map.drop([:__struct__, :__meta__])`. This keeps Jason as a
-   test-only dependency.
+2. **Custom struct encoding via a `Toon.Encodable` protocol** (not `Jason.Encoder`
+   and NOT `Toon.Encoder`, which is the internal encoder namespace). Modeled after
+   `Jason.Encoder`: consumers implement `Toon.Encodable` for their structs to control
+   normalization. The protocol has **no** `@fallback_to_any` — Normalize dispatches
+   to `Toon.Encodable.to_toon/1` only when `is_struct(value)` is true. Default
+   behavior when no impl exists is `Map.from_struct/1`. No Ecto-specific key drops.
+   This keeps Jason as a test-only dependency and avoids protocol dispatch on every
+   primitive value.
 
 3. **Structured decode errors.** `Toon.decode/2` returns
    `{:ok, json_value()} | {:error, Toon.DecodeError.t()}`. `Toon.DecodeError` is a
@@ -303,9 +504,11 @@ Internal helpers are marked `@moduledoc false` and are not part of the public co
    A lazy per-event `decode_stream/2` is **not** included in v0.1 — the use case is
    unclear and it would leak parser internals into the public API.
 
-6. **Bang variants in v0.1.** `encode!/2` and `decode!/2` are idiomatic Elixir
-   (`Jason.encode!/1`, `File.read!/1`) and are included from the first release.
-   They raise `Toon.DecodeError` / `Toon.EncodeError` on failure.
+6. **Bang variants in v0.1.** `encode/2` returns `{:ok, String.t()} | {:error,
+   Toon.EncodeError.t()}` so it has well-defined failure cases (unencodable term,
+   duplicate key, etc.). `encode!/2` unwraps or raises. `decode/2` returns
+   `{:ok, json_value()} | {:error, Toon.DecodeError.t()}`; `decode!/2` unwraps or
+   raises. Mirrors `Jason.encode/1` vs `Jason.encode!/1` exactly.
 
 7. **Atom/literal normalization.** `nil` → `null`; `true`/`false` stay as booleans;
    other atoms → strings; tuples → lists; structs via protocol or `Map.from_struct/1`;
@@ -361,7 +564,7 @@ defmodule Toon.MixProject do
   defp docs do
     [
       main: "Toon",
-      extras: ["README.md"]
+      extras: ["README.md", "CHANGELOG.md"]
     ]
   end
 end
@@ -400,11 +603,11 @@ Public typespecs live inside `lib/toon.ex` (no separate `Toon.Types` module):
 ]
 
 @type decode_opts :: [
-  indent: pos_integer(),
   strict: boolean(),
   expand_paths: :off | :safe
 ]
 ```
+> Note: decoders auto-detect indentation from input per §11; no `indent:` option.
 
 `lib/toon/decode_error.ex`:
 ```elixir
@@ -439,22 +642,29 @@ defmodule Toon.EncodeError do
 end
 ```
 
-`lib/toon/encoder_protocol.ex` — user-extensible struct encoding:
+`lib/toon/encodable.ex` — user-extensible struct encoding:
 ```elixir
-defprotocol Toon.Encoder do
+defprotocol Toon.Encodable do
   @moduledoc """
-  Protocol for converting custom Elixir terms (typically structs) into the TOON
-  data model. Modeled after `Jason.Encoder`. Implementations must return a value
-  that is itself encodable (map, list, keyword, primitive).
+  Protocol for converting custom Elixir structs into the TOON data model. Modeled
+  after `Jason.Encoder`. Implementations must return a value that is itself
+  encodable (map, list, keyword, primitive).
+
+  The encoder only invokes this protocol when the input satisfies `is_struct/1`.
+  Non-struct terms are handled directly by Normalize. There is no
+  `@fallback_to_any`: the default for structs without an implementation is
+  `Map.from_struct/1`, invoked by Normalize, not by the protocol.
   """
-  @fallback_to_any true
-  @spec to_toon(term()) :: term()
+  @spec to_toon(struct()) :: term()
   def to_toon(value)
 end
+```
 
-defimpl Toon.Encoder, for: Any do
-  def to_toon(%_{} = struct), do: struct |> Map.from_struct() |> Map.drop([:__meta__])
-  def to_toon(other), do: other
+Example derivation in user code:
+```elixir
+defmodule MyApp.User do
+  @derive {Toon.Encodable, only: [:id, :name]}
+  defstruct [:id, :name, :password_hash]
 end
 ```
 
@@ -464,13 +674,27 @@ end
 - Convert Elixir terms to the TOON/JSON data model
 - Atoms → strings (except `nil`, `true`, `false`)
 - Atom-keyed maps → string-keyed maps
-- Keyword lists with unique atom keys → ordered string-keyed objects
-- List of `{binary, value}` tuples → ordered string-keyed objects
 - `NaN`, `±Infinity` (`:nan`, `:infinity`, `:neg_infinity`) → `nil` per spec §3
-- Structs → `Toon.Encoder.to_toon/1` protocol dispatch (fallback: `Map.from_struct/1`)
-- Tuples → lists
+- Structs (`is_struct(v)`): if `Toon.Encodable.impl_for(v)` returns a module, call
+  `Toon.Encodable.to_toon/1` and recurse on the result; otherwise
+  `Map.from_struct/1` and recurse
+- Tuples (non-2 element OR inside list-of-tuples where rule below does not apply)
+  → lists
 - Plain maps → encoded in sorted-key order (deterministic but alphabetized); callers
   that need a specific order must pass a keyword list or tuple list instead
+- **List-shaped objects — disambiguation rules, applied in order:**
+  1. If `Keyword.keyword?(list)` returns true AND all keys are unique → object,
+     keys normalized to strings, order preserved.
+  2. Else if every element is a 2-tuple whose first element is `is_binary/1`
+     AND keys are unique → object, order preserved.
+  3. Else if every element is a 2-tuple whose first element is `is_binary/1` OR
+     `is_atom/1` (mixed keys, atoms stringified) AND keys are unique → object,
+     order preserved.
+  4. Otherwise → list (tuples recursively become lists of their elements).
+  Duplicate keys under rules 1–3 raise `Toon.EncodeError` with
+  `reason: :duplicate_key` and the conflicting key in `path`.
+- Unencodable terms (functions, pids, references, ports) raise `Toon.EncodeError`
+  with `reason: :unencodable_term`.
 
 **Step 4: Encoder — String Utils**
 
@@ -497,7 +721,7 @@ end
 
 **Step 5: Encoder — Core**
 
-`lib/toon/encoder.ex`:
+`lib/toon/encoder/core.ex` (`@moduledoc false`):
 - `encode_value/3` — dispatch on type
 - `encode_object/3` — key: value lines with indentation
 - `encode_array/3` — determine form:
@@ -555,19 +779,33 @@ defmodule Toon do
   # Defaults: indent: 2, delimiter: :comma, key_folding: :off,
   #           flatten_depth: :infinity, strict: false, expand_paths: :off
 
-  @spec encode(term(), encode_opts()) :: String.t()
+  @spec encode(term(), encode_opts()) :: {:ok, String.t()} | {:error, EncodeError.t()}
   def encode(input, opts \\ []) do
     opts = Keyword.validate!(opts, [:indent, :delimiter, :key_folding, :flatten_depth, :replacer])
-    input |> encode_lines(opts) |> Enum.join("\n")
+    try do
+      string = input |> Toon.Encoder.Core.encode_value(opts, []) |> IO.iodata_to_binary()
+      {:ok, string}
+    rescue
+      e in EncodeError -> {:error, e}
+    end
   end
 
   @spec encode!(term(), encode_opts()) :: String.t()
-  def encode!(input, opts \\ []), do: encode(input, opts)
+  def encode!(input, opts \\ []) do
+    case encode(input, opts) do
+      {:ok, string} -> string
+      {:error, %EncodeError{} = err} -> raise err
+    end
+  end
 
   @spec decode(String.t(), decode_opts()) :: {:ok, json_value()} | {:error, DecodeError.t()}
   def decode(input, opts \\ []) when is_binary(input) do
-    opts = Keyword.validate!(opts, [:indent, :strict, :expand_paths])
-    input |> String.split("\n") |> decode_from_lines(opts)
+    opts = Keyword.validate!(opts, [:strict, :expand_paths])
+    lines =
+      input
+      |> String.replace("\r\n", "\n")
+      |> String.split("\n")
+    decode_from_lines(lines, opts)
   end
 
   @spec decode!(String.t(), decode_opts()) :: json_value()
@@ -625,13 +863,18 @@ end
 
 ```
 mix.exs
+LICENSE                           # MIT license text (required for mix hex.publish)
+README.md
+CHANGELOG.md                      # Displayed in ExDoc via extras:
+.formatter.exs
+.gitignore
 lib/
   toon.ex                         # Public API: encode/2, encode!/2, decode/2, decode!/2,
                                   #             encode_lines/2, decode_from_lines/2
   toon/
     decode_error.ex               # Public: %Toon.DecodeError{} exception
     encode_error.ex               # Public: %Toon.EncodeError{} exception
-    encoder_protocol.ex           # Public: Toon.Encoder protocol (to_toon/1)
+    encodable.ex                  # Public: Toon.Encodable protocol (to_toon/1)
     constants.ex                  # @moduledoc false - delimiters, defaults
     string_utils.ex               # @moduledoc false - quoting/escaping (§7.1, §7.2)
     literal_utils.ex              # @moduledoc false - number/bool/null literal parsing
@@ -657,11 +900,9 @@ test/
     decoder_test.exs              # Unit tests for decoder
     string_utils_test.exs         # Quoting/escaping tests
   fixtures/
-    decode/                       # Copied from toon-format/spec
-    encode/                       # Copied from toon-format/spec
-README.md
-.formatter.exs
-.gitignore
+    SPEC_COMMIT.txt               # Pinned toon-format/spec commit SHA
+    decode/                       # Committed copy from toon-format/spec @ SPEC_COMMIT
+    encode/                       # Committed copy from toon-format/spec @ SPEC_COMMIT
 ```
 
 > Note: No `lib/toon/types.ex`. Public `@type` declarations live inside `lib/toon.ex`;
@@ -670,6 +911,13 @@ README.md
 ## Testing
 
 ### Conformance Tests (Priority 1)
+
+Fixtures are copied into `test/fixtures/` from a pinned `toon-format/spec` commit
+SHA recorded in `test/fixtures/SPEC_COMMIT.txt`. Do NOT fetch at test time —
+fixtures must be committed to the repository for reproducible CI runs. When a
+fixture file is added or removed, run `touch test/toon/conformance_test.exs &&
+mix test` to force recompilation (`@external_resource` does not observe new
+files matched by `Path.wildcard/1`).
 
 Use the 22 language-agnostic JSON fixtures from `toon-format/spec/tests/fixtures/`:
 
@@ -746,6 +994,7 @@ end
 All commits reference the main tracking issue:
 
 ```bash
+git commit -m "chore: verify hex.pm package name availability (#1)"
 git commit -m "chore: init mix project (KirillTemnov/elixir-toon#1)"
 git commit -m "feat(constants): add delimiter types and defaults (#1)"
 git commit -m "feat(encoder): implement normalize and string utils (#1)"
@@ -796,7 +1045,12 @@ Rollback: standard git revert (new package, no breaking changes to existing syst
 - [ ] Plain maps encoded with deterministic (sorted-key) output
 - [ ] Custom structs encoded via `Toon.Encoder` protocol (with default `Map.from_struct/1`)
 - [ ] `decode/2` returns `{:error, %Toon.DecodeError{line: _, reason: _}}` on bad input
-- [ ] `encode!/2` and `decode!/2` bang variants work and raise on failure
+- [ ] `encode/2` returns `{:ok, String.t()}` on success, `{:error, %Toon.EncodeError{}}` on
+      unencodable terms (pids, functions, duplicate keys, etc.)
+- [ ] `encode!/2` unwraps-or-raises; `decode!/2` unwraps-or-raises
+- [ ] LICENSE file present; `mix hex.build` produces no license warnings
+- [ ] `test/fixtures/SPEC_COMMIT.txt` records pinned spec SHA
+- [ ] CRLF input decoded identically to LF input
 - [ ] Number canonicalization: trailing zeros stripped, exponent forms accepted on decode
 - [ ] All options parameters accept keyword lists (not maps)
 - [ ] `mix dialyzer` runs clean
@@ -818,6 +1072,13 @@ Rollback: standard git revert (new package, no breaking changes to existing syst
   `@tag spec_section: ...` for selective test runs
 - **File endings:** All source files (`.ex`, `.exs`, `mix.exs`, `.formatter.exs`, `.gitignore`) must
   end with a trailing newline (`\n`), per project formatting rules
+- **Hex.pm name availability:** Before first publish, run `mix hex.search toon` and
+  `curl https://hex.pm/api/packages/toon`. If `:toon` is taken, fall back to
+  `:toon_format` or `:toon_ex` via `package: [name: :toon_format]` while keeping the
+  local `app:` atom stable
+- **Fixture pinning:** `test/fixtures/SPEC_COMMIT.txt` records the exact
+  `toon-format/spec` commit SHA used. Fixtures are committed to the repo, not
+  fetched at test time. Updating the pin is a deliberate versioned action
 
 ## Follow-up Tasks
 
@@ -826,6 +1087,8 @@ Rollback: standard git revert (new package, no breaking changes to existing syst
 3. Benchmark vs Jason for LLM prompt construction workflows
 4. Add a lazy `decode_stream/2` once a concrete consumer requires per-event streaming
 5. Add `NimbleOptions`-based option schema validation for better error messages
+6. Add property-based round-trip tests via `:stream_data` (generate arbitrary
+   `json_value()`, assert `encode |> decode == original`)
 
 > Note: `encode!/2`, `decode!/2`, and the `Toon.Encoder` protocol were moved from
 > Follow-up into the v0.1 Solution per Round 1a architecture review.
