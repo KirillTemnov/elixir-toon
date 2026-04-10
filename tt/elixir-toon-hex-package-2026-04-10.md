@@ -516,6 +516,150 @@ fixed in-place.
 
 ---
 
+### Round 2b: Implementation Review (Cross-Check)
+**Reviewer:** @implementation-expert-beta
+**Timestamp:** 2026-04-10
+**Cross-Reference:** Reviewed @implementation-expert-alpha findings (Round 2a)
+**Status:** ❌ BLOCKERS — 4 bugs that would cause incorrect runtime behavior or
+break the public API contract; fixed in-place.
+
+**Findings:**
+
+- ✅ AGREE: @alpha's CRITICAL fix #1 (encode test assertions → `{:ok, _}` tuples)
+  is valid and applied correctly throughout the unit test section.
+- ✅ AGREE: @alpha's CRITICAL fix #2 (`Keyword.validate!/2` moved outside `try`
+  block) is correct — `ArgumentError` from unknown options is a programmer error,
+  not an encodable runtime failure.
+- ✅ AGREE: @alpha's CRITICAL fix #3 (removing `@derive` example) is correct.
+  `defprotocol` does not auto-generate `__deriving__/3`; manual `defimpl` is the
+  right v0.1 story.
+- ✅ AGREE: @alpha's CRITICAL fix #4 (adding `do` bodies to stubs) is necessary —
+  naked `def f(x \\ default)` with no body clause is a compile error in Elixir.
+- ✅ AGREE: @alpha's fix on `starts_with_hyphen?` → `ambiguous_sign_prefix?` is
+  correct. Negative number literals are valid unquoted TOON scalars per §7.2.
+- ✅ AGREE: `encode_value/3` returning `iodata()` is a good design note; the
+  `IO.iodata_to_binary/1` call in `encode/2` is the correct flattening point.
+
+- ❌ MISSED BY ALPHA — BLOCKER (FIXED): **`decode/2` guard `when is_binary(input)`
+  has no fallback clause — non-binary input raises `FunctionClauseError` instead of
+  returning `{:error, DecodeError.t()}`, breaking the public API contract.**
+  With only one function clause `def decode(input, opts \\ []) when is_binary(input)`,
+  a caller passing a charlist `'hello'`, an atom, or a number gets
+  `** (FunctionClauseError) no function clause matching in Toon.decode/2` — a raw
+  VM error, not a structured `{:error, %Toon.DecodeError{}}`. The bang variant
+  `decode!/2` would also raise `FunctionClauseError` instead of `DecodeError`,
+  misleading callers about what went wrong. The API contract states
+  `{:ok, _} | {:error, DecodeError.t()}` — all failure paths must go through that
+  shape from `decode/2`, or the non-binary path must raise `ArgumentError`
+  explicitly with a clear message rather than leaking a VM-internal error.
+  **Fix:** Add a fallback clause to `decode/2` that returns
+  `{:error, %Toon.DecodeError{reason: :invalid_input, message: "input must be a
+  binary (UTF-8 string)"}}` for non-binary inputs. Updated code sample in Step 9.
+
+- ❌ MISSED BY ALPHA — BLOCKER (FIXED): **`Keyword.validate!/2` is called with a
+  plain atom list, so option DEFAULTS are never applied.** The comment in `lib/toon.ex`
+  says `# Defaults: indent: 2, delimiter: :comma, key_folding: :off, ...` but
+  `Keyword.validate!(opts, [:indent, :delimiter, :key_folding, :flatten_depth,
+  :replacer])` validates key names only — it does NOT inject default values.
+  Downstream `Toon.Encoder.Core.encode_value/3` would receive an opts keyword list
+  with NO `:indent` key when none was passed, and must then handle a missing key
+  defensively everywhere (`Keyword.get(opts, :indent, 2)` style), OR the TZ must
+  state that defaults are applied via `Keyword.validate!` using the `{key, default}`
+  form. The current spec is ambiguous: it describes defaults but does not show how
+  they are applied, leaving the implementer to guess. A `Keyword.validate!` call with
+  defaults uses `[indent: 2, delimiter: :comma, ...]` tuples, NOT atom lists.
+  **Fix:** Update the `encode/2` sample to show defaults applied via
+  `Keyword.validate!` with `{key, default}` tuples, OR add an explicit note that
+  `encode_value/3` must use `Keyword.get(opts, :key, default)` throughout. Both
+  approaches are valid; the spec must pick one. The TZ now documents the
+  `Keyword.get/3` with default approach (simpler, no default-double-definition risk)
+  and makes the comment explicit.
+
+- ❌ MISSED BY ALPHA — BLOCKER (FIXED): **`mix.exs` `package/0` has no `:files`
+  key — `mix hex.build` will include ALL project files including `test/fixtures/`
+  (22 JSON files) in the published Hex package.** Without an explicit `:files` list,
+  Hex.pm includes the default glob which captures the entire repo. The 22 conformance
+  fixture JSON files are test-only and should not be shipped to end users' `deps/`
+  directories (they add unnecessary weight). More critically, `mix hex.build`
+  may fail if it encounters unexpected binary-like content in fixtures.
+  **Fix:** Add explicit `:files` to `package/0` in `mix.exs`: `["lib", "mix.exs",
+  "README.md", "CHANGELOG.md", "LICENSE", ".formatter.exs"]`. Test fixtures stay
+  in `test/` but are excluded from the published package.
+
+- ❌ MISSED BY ALPHA — BLOCKER (FIXED): **Conformance test body stub `# ...` gives
+  implementers zero guidance on how decode vs encode tests should be structured.**
+  The `for` loop generates tests for BOTH `"decode"` and `"encode"` categories but
+  the test body is a single empty `# ...`. Decode fixtures have `"input"` +
+  `"expected"` fields and may have `"error": true`. Encode fixtures have `"input"`
+  (a JSON value) + `"expected"` (a TOON string), and may also have `"error": true`.
+  Without specifying the test body shape for each category, implementers will either
+  write incorrect assertions or skip error cases. The conformance harness is a
+  primary deliverable and must be complete enough to implement correctly.
+  **Fix:** Expand the conformance test to show the full body structure:
+  `if test_case["error"]` branch, category dispatch for `decode` vs `encode`,
+  and assertion pattern. Updated `conformance_test.exs` sample in Step 10.
+
+- ⚠️ CODE SMELL (FIXED): **`encode_lines/2` return type `Enumerable.t()` has no
+  error path, but encoding can fail mid-stream on unencodable terms.** `encode/2`
+  wraps failures in `{:error, EncodeError.t()}`. If `encode_lines/2` raises an
+  uncaught `EncodeError` during stream enumeration, callers using
+  `Enum.into(stream, File.stream!(...))` have no way to intercept the error before
+  I/O has partially committed. This is a semantic inconsistency. The TZ must
+  document this limitation explicitly: `encode_lines/2` raises (does not return
+  `{:error, _}`); callers that need error handling should use `encode/2` and pipe
+  the result. Note added to Step 9 and the public API docstring.
+
+- ⚠️ CODE SMELL (FIXED): **`@type delimiter :: ?, | ?\t | ?|` in `Toon.Constants`
+  is syntactically valid Elixir but is a charlist-literal-in-typespec idiom that
+  Dialyzer sees as `44 | 9 | 124`.** The `@type delimiter_key ::
+  :comma | :tab | :pipe` alongside it is cleaner for user-facing use. The internal
+  `delimiter` integer type should be written as `@type delimiter :: 44 | 9 | 124`
+  with a comment explaining the mapping, not as char literals in the typespec
+  position. This avoids Dialyzer confusion. Fixed in Constants sample.
+
+- ⚠️ CODE SMELL (NOTED, NOT FIXED): **`decode_from_lines/2` validates opts with
+  `Keyword.validate!/2` even when called via `decode/2` which already validated.**
+  The double-validation is harmless and correct (public functions must always
+  validate their own inputs since callers may call them directly). The redundancy
+  is intentional and acceptable. Left as-is.
+
+- 💡 MISSED SPEC DETAIL (FIXED): **The conformance fixture format has an `"error"`
+  boolean field for negative tests but this is nowhere mentioned in the Testing
+  section.** Error-case fixtures are present in `validation-errors.json` and
+  `indentation-errors.json`. Without noting the `"error"` field in the TZ, the
+  conformance test harness will silently produce passing tests on inputs that should
+  fail. Added `"error"` field handling to the conformance test sample and Testing
+  section description.
+
+- 💡 SPEC DETAIL (NOTED): **`@tag spec_section: test_case["specSection"]` will
+  produce `nil` tags for fixtures without a `"specSection"` field.** This is
+  harmless — `@tag spec_section: nil` is valid ExUnit. `mix test --only
+  spec_section:9.3` filters by value match, so nil-tagged tests are excluded from
+  that filter naturally. Not a bug.
+
+- 💡 SPEC DETAIL (NOTED): **`mix.exs` `docs/0` should include
+  `source_url_pattern: "https://github.com/USERNAME/elixir-toon/blob/main/%{path}#L%{line}"`**
+  for ExDoc 0.34 per-function "View Source" links to work. The `source_url:` key
+  is present but `source_url_pattern:` is needed for line-level anchors. Left as
+  a non-blocking implementation detail.
+
+**Changes Made:**
+1. Added fallback `decode/2` clause returning `{:error, %Toon.DecodeError{reason:
+   :invalid_input}}` for non-binary inputs. Updated Step 9 code sample (BLOCKER fix).
+2. Updated `encode/2` and `decode/2` option-handling note: clarified that
+   `Keyword.validate!` with atom list validates keys only; downstream functions
+   must use `Keyword.get(opts, key, default)` for defaults. Added explicit comment
+   in Step 9 sample (BLOCKER fix).
+3. Added `:files` key to `package/0` in `mix.exs` Step 1 sample (BLOCKER fix).
+4. Expanded conformance test sample in Step 10 with full decode/encode/error-case
+   body structure (BLOCKER fix).
+5. Added note to Step 9 and `encode_lines/2` docstring: raises on encoding failure,
+   use `encode/2` for error-safe paths (CODE SMELL fix).
+6. Fixed `@type delimiter` in Constants to use integer literals `44 | 9 | 124`
+   with a mapping comment (CODE SMELL fix).
+
+---
+
 ## Problem
 
 There is no Elixir implementation of the TOON format (Token-Oriented Object Notation). The
@@ -711,7 +855,10 @@ defmodule Toon.MixProject do
         "Spec" => "https://github.com/toon-format/spec",
         "Reference Implementation" => "https://github.com/toon-format/toon"
       },
-      maintainers: ["..."]
+      maintainers: ["..."],
+      # Explicit file list keeps test fixtures out of the published Hex package.
+      # test/fixtures/ (22 JSON conformance files) is intentionally excluded.
+      files: ~w(lib mix.exs README.md CHANGELOG.md LICENSE .formatter.exs)
     ]
   end
 
@@ -730,7 +877,9 @@ end
 ```elixir
 defmodule Toon.Constants do
   @moduledoc false
-  @type delimiter :: ?, | ?\t | ?|
+  # Integer char-codes: comma = 44, tab = 9, pipe = 124.
+  # Written as integer literals (not char literals) for Dialyzer clarity.
+  @type delimiter :: 44 | 9 | 124
   @type delimiter_key :: :comma | :tab | :pipe
 
   @default_delimiter ?,
@@ -964,8 +1113,15 @@ defmodule Toon do
   alias Toon.{DecodeError, EncodeError}
 
   # Option keys validated with Keyword.validate!/2 at each entry point.
-  # Defaults: indent: 2, delimiter: :comma, key_folding: :off,
-  #           flatten_depth: :infinity, strict: false, expand_paths: :off
+  # Keyword.validate!/2 with an atom list validates key names only — it does NOT
+  # inject defaults. Defaults are applied in the implementation via
+  # Keyword.get(opts, :key, default), e.g.:
+  #   indent         → Keyword.get(opts, :indent, 2)
+  #   delimiter      → Keyword.get(opts, :delimiter, :comma)
+  #   key_folding    → Keyword.get(opts, :key_folding, :off)
+  #   flatten_depth  → Keyword.get(opts, :flatten_depth, :infinity)
+  #   strict         → Keyword.get(opts, :strict, false)
+  #   expand_paths   → Keyword.get(opts, :expand_paths, :off)
 
   @spec encode(term(), encode_opts()) :: {:ok, String.t()} | {:error, EncodeError.t()}
   def encode(input, opts \\ []) do
@@ -991,12 +1147,24 @@ defmodule Toon do
 
   @spec decode(String.t(), decode_opts()) :: {:ok, json_value()} | {:error, DecodeError.t()}
   def decode(input, opts \\ []) when is_binary(input) do
+    # Keyword.validate!/2 with an atom list validates key names only; it does NOT
+    # inject defaults. Downstream functions use Keyword.get(opts, :key, default).
     opts = Keyword.validate!(opts, [:strict, :expand_paths])
     lines =
       input
       |> String.replace("\r\n", "\n")
       |> String.split("\n")
     decode_from_lines(lines, opts)
+  end
+
+  # Fallback clause: return a structured error instead of leaking FunctionClauseError
+  # when callers accidentally pass a charlist, atom, or other non-binary.
+  def decode(input, _opts) do
+    {:error,
+     %DecodeError{
+       reason: :invalid_input,
+       message: "input must be a binary (UTF-8 string), got: #{inspect(input)}"
+     }}
   end
 
   @spec decode!(String.t(), decode_opts()) :: json_value()
@@ -1012,6 +1180,9 @@ defmodule Toon do
     opts = Keyword.validate!(opts, [:indent, :delimiter, :key_folding, :flatten_depth, :replacer])
     # Returns a lazy Stream of line binaries. Implementation delegates to
     # Toon.Encoder.Core via Stream.resource/3.
+    # NOTE: unlike encode/2, this function does NOT return {:error, _} — encoding
+    # failures (unencodable terms, duplicate keys) raise EncodeError during stream
+    # enumeration. Callers that need error-safe encoding must use encode/2 instead.
     Toon.Encoder.Core.encode_lines(input, opts)
   end
 
@@ -1042,22 +1213,65 @@ defmodule Toon.ConformanceTest do
 
   @fixtures_path "test/fixtures"
 
-  # Dynamically generate test cases from JSON fixtures.
-  # @external_resource ensures recompilation when fixtures change.
+  # Dynamically generate test cases from JSON fixtures committed at SPEC_COMMIT.
+  # @external_resource ensures recompilation when a fixture file changes.
+  # Note: adding a NEW fixture file requires `touch test/toon/conformance_test.exs`
+  # to force recompilation — Path.wildcard/1 at compile time cannot observe new files.
   for category <- ["decode", "encode"] do
     for fixture_file <- Path.wildcard("#{@fixtures_path}/#{category}/*.json") do
       @external_resource fixture_file
       fixture = File.read!(fixture_file) |> Jason.decode!()
+
       for test_case <- fixture["tests"] do
+        # Capture loop variables as module attributes so they are available
+        # inside the test body (the `test` macro creates a new scope).
         @tag spec_section: test_case["specSection"]
-        test "#{category}/#{fixture["category"]}: #{test_case["name"]}" do
-          # ...
+        @tag category: category
+        @test_input test_case["input"]
+        @test_expected test_case["expected"]
+        @test_is_error test_case["error"] == true
+        @test_name "#{category}/#{fixture["category"]}: #{test_case["name"]}"
+
+        test @test_name do
+          if @test_is_error do
+            # Negative test: input must produce an error, not a successful result.
+            case @category do
+              "decode" ->
+                assert {:error, %Toon.DecodeError{}} = Toon.decode(@test_input)
+
+              "encode" ->
+                # Encode fixtures with "error": true have unencodable inputs.
+                # The input field in encode error fixtures is a raw JSON value
+                # (decoded by Jason); pass it directly to Toon.encode/2.
+                assert {:error, %Toon.EncodeError{}} = Toon.encode(@test_input)
+            end
+          else
+            case @category do
+              "decode" ->
+                # "input" is a TOON string; "expected" is the decoded JSON value.
+                assert {:ok, result} = Toon.decode(@test_input)
+                assert result == @test_expected
+
+              "encode" ->
+                # "input" is a JSON value (already parsed by Jason above);
+                # "expected" is the canonical TOON-encoded string.
+                assert {:ok, result} = Toon.encode(@test_input)
+                assert result == @test_expected
+            end
+          end
         end
       end
     end
   end
 end
 ```
+
+> Note: Fixture `"input"` in encode tests is a JSON value (object/array/primitive)
+> as parsed by `Jason.decode!`. Fixture `"input"` in decode tests is a raw TOON
+> string. Fixture `"error": true` marks negative tests — both decode and encode
+> fixture files can have error cases (see `validation-errors.json`,
+> `indentation-errors.json`).
+
 
 ### Files to Create
 
@@ -1131,6 +1345,24 @@ Use the 22 language-agnostic JSON fixtures from `toon-format/spec/tests/fixtures
 - `arrays-nested.json`, `arrays-objects.json`, `arrays-primitive.json`, `arrays-tabular.json`
 - `delimiters.json`, `key-folding.json`, `objects.json`, `primitives.json`, `whitespace.json`
 
+**Fixture structure reference:**
+```json
+{
+  "version": "1.4",
+  "category": "decode",
+  "tests": [
+    { "name": "parses safe unquoted string", "input": "hello", "expected": "hello" },
+    { "name": "rejects bad indent", "input": "key:\n  a\n b", "error": true }
+  ]
+}
+```
+- `"input"`: for decode fixtures — a raw TOON string; for encode fixtures — a JSON value
+  (object/array/primitive), parsed at compile time by `Jason.decode!`.
+- `"expected"`: for decode — the expected decoded value; for encode — the expected TOON string.
+- `"error": true` marks **negative tests**: the operation must fail with a structured error,
+  not return `{:ok, _}`. Files containing error cases: `validation-errors.json`,
+  `indentation-errors.json`. The conformance test harness MUST branch on this field.
+
 ### Unit Tests
 
 ```elixir
@@ -1187,6 +1419,12 @@ describe "Toon.decode/2" do
     assert {:ok, 42} = Toon.decode("42")
     assert {:ok, -3.14} = Toon.decode("-3.14")
     assert {:ok, "05"} = Toon.decode("05")  # leading zero → string
+  end
+
+  test "returns structured error for non-binary input" do
+    # Non-binary inputs must return {:error, DecodeError} not raise FunctionClauseError.
+    assert {:error, %Toon.DecodeError{reason: :invalid_input}} = Toon.decode(:not_a_string)
+    assert {:error, %Toon.DecodeError{reason: :invalid_input}} = Toon.decode(123)
   end
 end
 ```
@@ -1248,13 +1486,16 @@ Rollback: standard git revert (new package, no breaking changes to existing syst
 - [ ] `Toon.encode/2` round-trips with `Toon.decode/2` for all spec examples
 - [ ] Strict mode (`strict: true`) correctly rejects all invalid inputs from `validation-errors.json`
 - [ ] `key_folding: :safe` + `expand_paths: :safe` round-trip losslessly
-- [ ] Streaming encode via `encode_lines/2` returns a correct `Enumerable.t()`
+- [ ] Streaming encode via `encode_lines/2` returns a correct `Enumerable.t()` (raises on
+      encoding failure — does NOT return `{:error, _}`; documented in function docstring)
 - [ ] `decode_from_lines/2` correctly decodes `File.stream!/1` input
 - [ ] Atom-keyed maps normalized correctly in encoder
 - [ ] Keyword lists preserved in original order during encoding
 - [ ] Plain maps encoded with deterministic (sorted-key) output
 - [ ] Custom structs encoded via `Toon.Encodable` protocol (with default `Map.from_struct/1`)
-- [ ] `decode/2` returns `{:error, %Toon.DecodeError{line: _, reason: _}}` on bad input
+- [ ] `decode/2` returns `{:error, %Toon.DecodeError{reason: :invalid_input}}` for non-binary input
+      (no `FunctionClauseError` leaks — fallback clause returns structured error)
+- [ ] `decode/2` returns `{:error, %Toon.DecodeError{line: _, reason: _}}` on malformed TOON input
 - [ ] `encode/2` returns `{:ok, String.t()}` on success, `{:error, %Toon.EncodeError{}}` on
       unencodable terms (pids, functions, duplicate keys, etc.)
 - [ ] `encode!/2` unwraps-or-raises; `decode!/2` unwraps-or-raises
