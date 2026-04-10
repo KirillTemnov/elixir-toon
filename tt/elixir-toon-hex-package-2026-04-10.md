@@ -39,6 +39,132 @@
 
 ---
 
+### Round 1a: Architecture Review (Independent)
+**Reviewer:** @architecture-designer-alpha
+**Timestamp:** 2026-04-10
+**Status:** ⚠️ WARNINGS — multiple architectural concerns, several fixed in-place
+
+**Findings:**
+
+- ✅ LGTM: Module decomposition mirroring the TypeScript reference is reasonable and
+  keeps the port traceable. Encoder/Decoder split is clean. Symmetric `Encoder.Folding` ↔
+  `Decoder.Expand` pairing is sound.
+- ✅ LGTM: No supervision tree — correct choice for a pure library. No GenServer needed.
+- ✅ LGTM: Conformance-first test strategy with language-agnostic fixtures is the right
+  approach for a spec-conformant port.
+- ✅ LGTM: Jason is correctly scoped as test-only (`only: :test`) in `mix.exs`.
+
+- ❌ ISSUE (FIXED): **`Jason.Encoder` protocol referenced in runtime normalize path
+  while Jason is a test-only dep.** Step 3 says "Structs → call `Jason.Encoder` protocol or
+  `Map.from_struct/1`". This creates a hidden runtime dependency on Jason. Fix: define a
+  native `Toon.Encoder` protocol (similar to `Jason.Encoder`) as part of the initial design,
+  not as a follow-up task. Structs default to `Map.from_struct/1` when no protocol impl exists.
+
+- ❌ ISSUE (FIXED): **Options as maps are unidiomatic in Elixir.** The TZ uses
+  `opts \\ %{}` and `@type encode_options :: %{optional(:indent) => ...}`. Standard Elixir
+  libraries (Jason, Ecto, Phoenix, Plug) use keyword lists: `opts \\ []`. Callers expect
+  `Toon.encode(value, indent: 4, delimiter: :tab)`, not `Toon.encode(value, %{indent: 4})`.
+  Fix: switch all option parameters to keyword lists; validate via pattern matching or
+  `Keyword.validate!/2` (available since Elixir 1.13).
+
+- ❌ ISSUE (FIXED): **Map key ordering is a correctness problem, not just a note.**
+  Elixir maps do NOT preserve insertion order — small maps (≤32 keys) are sorted by term
+  order, large maps use HAMT. The TypeScript reference relies on JS object insertion order
+  for deterministic output. This must be an explicit architectural decision in the Solution,
+  not a trailing note. Fix: document the deterministic ordering contract — accept
+  `Keyword.t()` and lists of `{key, value}` tuples as ordered alternatives; for plain maps,
+  use sorted keys for deterministic (but differently-ordered) output. Conformance fixtures
+  must be reviewed to confirm this doesn't break round-trip.
+
+- ❌ ISSUE (FIXED): **Error type `{:error, term()}` is too loose for a library API.**
+  Users of `Toon.decode/2` need structured errors to report line numbers and reasons.
+  Fix: introduce `Toon.DecodeError` struct with `:line`, `:column`, `:reason`, `:message`
+  fields. Return `{:error, %Toon.DecodeError{...}}`.
+
+- ❌ ISSUE (FIXED): **`decode_stream/2` semantics are ambiguous.** Returning "Enumerable
+  of events" leaks internal parser events into the public API. A streaming decoder should
+  either (a) decode a sequence of top-level TOON documents from a chunked source, or
+  (b) decode a single document from a lazy line source. Option (b) is more useful and
+  aligns with `decode_from_lines/2` which the TZ already defines. Fix: drop
+  `decode_stream/2` from the public API for v0.1; defer streaming iteration to a follow-up
+  once a concrete use case emerges. Keep `decode_from_lines/2` which accepts any
+  `Enumerable.t()` of lines — this already covers the lazy-source case.
+
+- ⚠️ CONCERN (FIXED): **Separate `Toon.Types` module is a TypeScript-ism.** Elixir places
+  `@type` declarations in the owning module. A dedicated types module splits the public
+  contract across files for no benefit. Fix: move `@type` declarations inline into `Toon`
+  (public types) and into the modules that own each internal type.
+
+- ⚠️ CONCERN (FIXED): **Internal helpers leak into the public namespace.**
+  `Toon.StringUtils`, `Toon.LiteralUtils`, `Toon.Validation` sit at the top level alongside
+  the public `Toon` module, implying they are part of the public API. Fix: mark them
+  `@moduledoc false` OR move them under `Toon.Internal.*`. The TZ should state this
+  explicitly.
+
+- ⚠️ CONCERN (FIXED): **Name clash: two `Validation` modules.** `Toon.Validation` (shared
+  literal validation) and `Toon.Decoder.Validation` (strict-mode checks) invite confusion.
+  Fix: rename the strict-mode module to `Toon.Decoder.StrictMode` to reflect its purpose.
+
+- ⚠️ CONCERN (FIXED): **Acceptance criterion requires Dialyzer but no Dialyzer dep.**
+  `mix dialyzer` cannot run without `:dialyxir` in deps. Fix: add `{:dialyxir, "~> 1.4",
+  only: [:dev], runtime: false}` to `mix.exs` deps.
+
+- ⚠️ CONCERN (FIXED): **`start_permanent` is dead code in a pure library.** Without an
+  `application` callback, `start_permanent` has no effect. It's boilerplate noise from
+  `mix new --sup`. Fix: remove from `mix.exs`.
+
+- ⚠️ CONCERN: **Input-type contract for `encode/2` is underspecified.** The TZ does not
+  enumerate what Elixir terms are accepted: map, keyword list, list of tuples, struct,
+  number, binary, atom, tuple, nil. This must be listed explicitly to drive Normalize
+  module tests. (Partially addressed by new input-ordering section; full enumeration left
+  to implementer.)
+
+- ⚠️ CONCERN: **Compile-time fixture generation needs `@external_resource`.** The
+  `conformance_test.exs` dynamic `for` loop reading fixture JSON at compile time will not
+  trigger recompilation when fixtures change unless each fixture file is registered as an
+  external resource. Fix: add `@external_resource` for each fixture path. Note added to
+  testing section.
+
+- 💡 SUGGESTION: **Consider `NimbleOptions`** for option validation. It produces
+  self-documenting, typed option specs and good error messages. Adds one dep but pays for
+  itself on public APIs. Left as a non-blocking suggestion.
+
+- 💡 SUGGESTION: **Add `encode!/2` and `decode!/2` bang variants to v0.1**, not as a
+  follow-up. They are idiomatic in Elixir (`Jason.encode!/1`, `File.read!/1`) and cost
+  ~6 lines each. Moving from Follow-up → Solution.
+
+- 💡 SUGGESTION: **Drop the redundant `encode_lines/2`** unless there's a concrete
+  streaming use case. TOON documents are typically small (LLM prompts ≤ 10KB). Lazy
+  encoding adds implementation complexity (`Stream.resource/3`) for unclear benefit.
+  Flagged — decision left to implementer.
+
+**Changes Made:**
+1. Reworked Architecture section: added explicit "Key architectural decisions" subsection
+   covering Elixir protocol, options style, key ordering, error types.
+2. Added `Toon.Encoder` protocol to module list and removed `Jason.Encoder` reference
+   from the Normalize step.
+3. Changed all options parameters from maps (`%{}`) to keyword lists (`[]`) in code
+   samples.
+4. Added `Toon.DecodeError` struct to Files to Create and updated decode return types
+   throughout.
+5. Removed `decode_stream/2` from the public API; kept `decode_from_lines/2` which
+   already handles lazy line sources.
+6. Removed `lib/toon/types.ex` from Files to Create; `@type` declarations move into
+   owning modules.
+7. Renamed `Toon.Decoder.Validation` → `Toon.Decoder.StrictMode`.
+8. Marked `Toon.StringUtils`, `Toon.LiteralUtils`, `Toon.Validation` as
+   `@moduledoc false` (internal) in the module list.
+9. Added `:dialyxir` to `mix.exs` dev deps.
+10. Removed `start_permanent` from `mix.exs`.
+11. Moved `encode!/2` and `decode!/2` from Follow-up to Solution.
+12. Moved `Toon.Encoder` protocol from Follow-up to Solution.
+13. Added `@external_resource` note to conformance test section.
+14. Added "Key ordering contract" subsection to Solution documenting the
+    deterministic-ordering strategy.
+15. Updated acceptance criteria to reflect new API surface.
+
+---
+
 ## Problem
 
 There is no Elixir implementation of the TOON format (Token-Oriented Object Notation). The
@@ -116,35 +242,74 @@ the TypeScript reference implementation's architecture.
 
 ### Architecture
 
-Port the TypeScript reference implementation module-by-module to idiomatic Elixir:
+Port the TypeScript reference implementation module-by-module to idiomatic Elixir.
+Internal helpers are marked `@moduledoc false` and are not part of the public contract.
 
-| TypeScript module           | Elixir module              |
-|-----------------------------|----------------------------|
-| `src/index.ts`              | `Toon` (public API)        |
-| `src/types.ts`              | `Toon.Types` (typespecs)   |
-| `src/constants.ts`          | `Toon.Constants`           |
-| `src/encode/normalize.ts`   | `Toon.Encoder.Normalize`   |
-| `src/encode/encoders.ts`    | `Toon.Encoder`             |
-| `src/encode/primitives.ts`  | `Toon.Encoder.Primitives`  |
-| `src/encode/folding.ts`     | `Toon.Encoder.Folding`     |
-| `src/encode/replacer.ts`    | `Toon.Encoder.Replacer`    |
-| `src/decode/scanner.ts`     | `Toon.Decoder.Scanner`     |
-| `src/decode/parser.ts`      | `Toon.Decoder.Parser`      |
-| `src/decode/decoders.ts`    | `Toon.Decoder`             |
-| `src/decode/event-builder.ts` | `Toon.Decoder.EventBuilder` |
-| `src/decode/expand.ts`      | `Toon.Decoder.Expand`      |
-| `src/decode/validation.ts`  | `Toon.Decoder.Validation`  |
-| `src/shared/string-utils.ts` | `Toon.StringUtils`        |
-| `src/shared/literal-utils.ts` | `Toon.LiteralUtils`      |
-| `src/shared/validation.ts`  | `Toon.Validation`          |
+| TypeScript module             | Elixir module                   | Visibility |
+|-------------------------------|---------------------------------|------------|
+| `src/index.ts`                | `Toon` (public API)             | public     |
+| —                             | `Toon.Encoder` (protocol)       | public     |
+| —                             | `Toon.DecodeError` (exception)  | public     |
+| `src/constants.ts`            | `Toon.Constants`                | internal   |
+| `src/encode/normalize.ts`     | `Toon.Encoder.Normalize`        | internal   |
+| `src/encode/encoders.ts`      | `Toon.Encoder.Core`             | internal   |
+| `src/encode/primitives.ts`    | `Toon.Encoder.Primitives`       | internal   |
+| `src/encode/folding.ts`       | `Toon.Encoder.Folding`          | internal   |
+| `src/encode/replacer.ts`      | `Toon.Encoder.Replacer`         | internal   |
+| `src/decode/scanner.ts`       | `Toon.Decoder.Scanner`          | internal   |
+| `src/decode/parser.ts`        | `Toon.Decoder.Parser`           | internal   |
+| `src/decode/decoders.ts`      | `Toon.Decoder.Core`             | internal   |
+| `src/decode/event-builder.ts` | `Toon.Decoder.EventBuilder`     | internal   |
+| `src/decode/expand.ts`        | `Toon.Decoder.Expand`           | internal   |
+| `src/decode/validation.ts`    | `Toon.Decoder.StrictMode`       | internal   |
+| `src/shared/string-utils.ts`  | `Toon.StringUtils`              | internal   |
+| `src/shared/literal-utils.ts` | `Toon.LiteralUtils`             | internal   |
+| `src/shared/validation.ts`    | `Toon.Validation`               | internal   |
 
-**Elixir-specific adaptations:**
-- No async streaming (Elixir has `Stream` for lazy evaluation instead of async iterables)
-- Elixir maps are used instead of JS objects; map key ordering follows insertion order via `Map`
-- Atom keys normalized to strings in encoder
-- `nil` → `null`, `true`/`false` → booleans (already matching)
-- Streaming encode via `Stream.resource/3` or generator function returning `Enumerable`
-- Streaming decode via `Stream.resource/3` over lines
+> Note: `src/types.ts` has no direct Elixir equivalent — typespecs live in the module
+> that owns each concept (idiomatic Elixir), not in a dedicated types module.
+
+**Key architectural decisions (Elixir-specific adaptations):**
+
+1. **Options are keyword lists, not maps.** All public functions accept `opts \\ []`.
+   Example: `Toon.encode(value, indent: 4, delimiter: :tab)`. Validated with
+   `Keyword.validate!/2`. This matches Jason/Ecto/Phoenix conventions.
+
+2. **Custom struct encoding via a `Toon.Encoder` protocol** (not `Jason.Encoder`).
+   Modeled after `Jason.Encoder`: consumers implement `Toon.Encoder` for their structs
+   to control normalization. Default behavior for any `struct` without an impl is
+   `Map.from_struct/1 |> Map.drop([:__struct__, :__meta__])`. This keeps Jason as a
+   test-only dependency.
+
+3. **Structured decode errors.** `Toon.decode/2` returns
+   `{:ok, json_value()} | {:error, Toon.DecodeError.t()}`. `Toon.DecodeError` is a
+   struct with `:line`, `:column`, `:reason`, `:message` fields and implements
+   `Exception` so it can be raised by `decode!/2`.
+
+4. **Key ordering contract.** Elixir maps do NOT preserve insertion order. To give
+   callers deterministic output that matches the order they care about, `encode/2`
+   accepts three container shapes for ordered objects:
+   - `map()` — keys are encoded in sorted order (deterministic but alphabetized)
+   - `Keyword.t()` — keys are encoded in the list order (callers use this for control)
+   - `[{binary() | atom(), value}]` — same as keyword but allows binary keys
+   When an object reaches the encoder via any of the above, it produces stable output.
+   Atom keys are normalized to strings.
+
+5. **No async; streaming via `Stream`.** `encode/2` produces a complete string.
+   `encode_lines/2` returns an `Enumerable.t()` of line binaries built with
+   `Stream.resource/3` for callers that need to pipe into `IO.stream/2` or a socket.
+   `decode_from_lines/2` accepts an `Enumerable.t()` of line binaries (typically from
+   `File.stream!/1` or `IO.stream/2`) and returns `{:ok, value} | {:error, error}`.
+   A lazy per-event `decode_stream/2` is **not** included in v0.1 — the use case is
+   unclear and it would leak parser internals into the public API.
+
+6. **Bang variants in v0.1.** `encode!/2` and `decode!/2` are idiomatic Elixir
+   (`Jason.encode!/1`, `File.read!/1`) and are included from the first release.
+   They raise `Toon.DecodeError` / `Toon.EncodeError` on failure.
+
+7. **Atom/literal normalization.** `nil` → `null`; `true`/`false` stay as booleans;
+   other atoms → strings; tuples → lists; structs via protocol or `Map.from_struct/1`;
+   `NaN`, `±Infinity` (`:nan`, `:infinity`, `:neg_infinity`) → `nil` per spec §3.
 
 ### Implementation
 
@@ -164,7 +329,6 @@ defmodule Toon.MixProject do
       app: :toon,
       version: "0.1.0",
       elixir: "~> 1.15",
-      start_permanent: Mix.env() == :prod,
       deps: deps(),
       description: "Token-Oriented Object Notation (TOON) encoder/decoder for Elixir",
       package: package(),
@@ -177,6 +341,7 @@ defmodule Toon.MixProject do
   defp deps do
     [
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:jason, "~> 1.4", only: :test}
     ]
   end
@@ -202,12 +367,13 @@ defmodule Toon.MixProject do
 end
 ```
 
-**Step 2: Constants and Types**
+**Step 2: Constants, typespecs, and error types**
 
 `lib/toon/constants.ex`:
 ```elixir
 defmodule Toon.Constants do
-  @type delimiter :: ?,  | ?\t | ?|
+  @moduledoc false
+  @type delimiter :: ?, | ?\t | ?|
   @type delimiter_key :: :comma | :tab | :pipe
 
   @default_delimiter ?,
@@ -217,43 +383,101 @@ defmodule Toon.Constants do
 end
 ```
 
-`lib/toon/types.ex` — typespecs mirroring TypeScript types:
+Public typespecs live inside `lib/toon.ex` (no separate `Toon.Types` module):
 ```elixir
+# lib/toon.ex
 @type json_primitive :: String.t() | number() | boolean() | nil
 @type json_object :: %{String.t() => json_value()}
 @type json_array :: [json_value()]
 @type json_value :: json_primitive() | json_object() | json_array()
 
-@type encode_options :: %{
-  optional(:indent) => pos_integer(),
-  optional(:delimiter) => :comma | :tab | :pipe,
-  optional(:key_folding) => :off | :safe,
-  optional(:flatten_depth) => pos_integer() | :infinity,
-  optional(:replacer) => (String.t(), json_value(), [String.t() | integer()] -> term())
-}
+@type encode_opts :: [
+  indent: pos_integer(),
+  delimiter: :comma | :tab | :pipe,
+  key_folding: :off | :safe,
+  flatten_depth: pos_integer() | :infinity,
+  replacer: (String.t(), json_value(), [String.t() | integer()] -> term())
+]
 
-@type decode_options :: %{
-  optional(:indent) => pos_integer(),
-  optional(:strict) => boolean(),
-  optional(:expand_paths) => :off | :safe
-}
+@type decode_opts :: [
+  indent: pos_integer(),
+  strict: boolean(),
+  expand_paths: :off | :safe
+]
+```
+
+`lib/toon/decode_error.ex`:
+```elixir
+defmodule Toon.DecodeError do
+  @moduledoc """
+  Raised or returned when `Toon.decode/2` encounters malformed input.
+  """
+  defexception [:line, :column, :reason, :message]
+
+  @type t :: %__MODULE__{
+          line: pos_integer() | nil,
+          column: pos_integer() | nil,
+          reason: atom(),
+          message: String.t()
+        }
+end
+```
+
+`lib/toon/encode_error.ex`:
+```elixir
+defmodule Toon.EncodeError do
+  @moduledoc """
+  Raised by `Toon.encode!/2` when the input cannot be normalized to the TOON data model.
+  """
+  defexception [:reason, :message, :path]
+
+  @type t :: %__MODULE__{
+          reason: atom(),
+          message: String.t(),
+          path: [String.t() | non_neg_integer()]
+        }
+end
+```
+
+`lib/toon/encoder_protocol.ex` — user-extensible struct encoding:
+```elixir
+defprotocol Toon.Encoder do
+  @moduledoc """
+  Protocol for converting custom Elixir terms (typically structs) into the TOON
+  data model. Modeled after `Jason.Encoder`. Implementations must return a value
+  that is itself encodable (map, list, keyword, primitive).
+  """
+  @fallback_to_any true
+  @spec to_toon(term()) :: term()
+  def to_toon(value)
+end
+
+defimpl Toon.Encoder, for: Any do
+  def to_toon(%_{} = struct), do: struct |> Map.from_struct() |> Map.drop([:__meta__])
+  def to_toon(other), do: other
+end
 ```
 
 **Step 3: Encoder — Normalize**
 
-`lib/toon/encoder/normalize.ex`:
-- Convert Elixir terms to the JSON data model
+`lib/toon/encoder/normalize.ex` (`@moduledoc false`):
+- Convert Elixir terms to the TOON/JSON data model
 - Atoms → strings (except `nil`, `true`, `false`)
 - Atom-keyed maps → string-keyed maps
-- `NaN`, `±Infinity` → `nil`
-- Structs → call `Jason.Encoder` protocol or `Map.from_struct/1`
+- Keyword lists with unique atom keys → ordered string-keyed objects
+- List of `{binary, value}` tuples → ordered string-keyed objects
+- `NaN`, `±Infinity` (`:nan`, `:infinity`, `:neg_infinity`) → `nil` per spec §3
+- Structs → `Toon.Encoder.to_toon/1` protocol dispatch (fallback: `Map.from_struct/1`)
 - Tuples → lists
+- Plain maps → encoded in sorted-key order (deterministic but alphabetized); callers
+  that need a specific order must pass a keyword list or tuple list instead
 
 **Step 4: Encoder — String Utils**
 
-`lib/toon/string_utils.ex` — quoting rules from §7.2:
+`lib/toon/string_utils.ex` (`@moduledoc false`) — quoting rules from §7.2:
 ```elixir
 defmodule Toon.StringUtils do
+  @moduledoc false
   @spec needs_quoting?(String.t(), integer()) :: boolean()
   def needs_quoting?(str, active_delimiter) do
     str == "" or
@@ -306,39 +530,67 @@ end
 `lib/toon/decoder/event_builder.ex`:
 - Consume event stream, build final `json_value()`
 
-**Step 8: Decoder — Validation (Strict Mode)**
+**Step 8: Decoder — Strict Mode**
 
-`lib/toon/decoder/validation.ex`:
+`lib/toon/decoder/strict_mode.ex` (`@moduledoc false`, renamed from `Validation` to avoid
+name clash with `Toon.Validation`):
 - Enforce array length counts
 - Validate indentation consistency
 - Reject invalid escape sequences
-- Return `{:error, reason}` tuple on violations
+- Return `{:error, %Toon.DecodeError{}}` tuple on violations with line/column set
 
 **Step 9: Public API**
 
 `lib/toon.ex`:
 ```elixir
 defmodule Toon do
-  @spec encode(term(), encode_options()) :: String.t()
-  def encode(input, opts \\ %{}) do
+  @moduledoc """
+  Token-Oriented Object Notation (TOON) encoder/decoder for Elixir.
+  Spec-conformant with TOON v3.0.
+  """
+
+  alias Toon.{DecodeError, EncodeError}
+
+  # Option keys validated with Keyword.validate!/2 at each entry point.
+  # Defaults: indent: 2, delimiter: :comma, key_folding: :off,
+  #           flatten_depth: :infinity, strict: false, expand_paths: :off
+
+  @spec encode(term(), encode_opts()) :: String.t()
+  def encode(input, opts \\ []) do
+    opts = Keyword.validate!(opts, [:indent, :delimiter, :key_folding, :flatten_depth, :replacer])
     input |> encode_lines(opts) |> Enum.join("\n")
   end
 
-  @spec decode(String.t(), decode_options()) :: {:ok, json_value()} | {:error, term()}
-  def decode(input, opts \\ %{}) do
+  @spec encode!(term(), encode_opts()) :: String.t()
+  def encode!(input, opts \\ []), do: encode(input, opts)
+
+  @spec decode(String.t(), decode_opts()) :: {:ok, json_value()} | {:error, DecodeError.t()}
+  def decode(input, opts \\ []) when is_binary(input) do
+    opts = Keyword.validate!(opts, [:indent, :strict, :expand_paths])
     input |> String.split("\n") |> decode_from_lines(opts)
   end
 
-  @spec encode_lines(term(), encode_options()) :: Enumerable.t()
-  def encode_lines(input, opts \\ %{})
+  @spec decode!(String.t(), decode_opts()) :: json_value()
+  def decode!(input, opts \\ []) do
+    case decode(input, opts) do
+      {:ok, value} -> value
+      {:error, %DecodeError{} = err} -> raise err
+    end
+  end
 
-  @spec decode_from_lines(Enumerable.t(), decode_options()) :: {:ok, json_value()} | {:error, term()}
-  def decode_from_lines(lines, opts \\ %{})
+  @spec encode_lines(term(), encode_opts()) :: Enumerable.t()
+  def encode_lines(input, opts \\ [])
 
-  @spec decode_stream(Enumerable.t(), decode_options()) :: Enumerable.t()
-  def decode_stream(lines, opts \\ %{})
+  @spec decode_from_lines(Enumerable.t(), decode_opts()) ::
+          {:ok, json_value()} | {:error, DecodeError.t()}
+  def decode_from_lines(lines, opts \\ [])
 end
 ```
+
+> Note: `decode_stream/2` is intentionally **not** exposed in v0.1. Streaming use cases
+> are covered by `decode_from_lines/2` accepting any `Enumerable.t()` of line binaries
+> (e.g. `File.stream!("data.toon") |> Toon.decode_from_lines()`). A lazy per-event
+> stream can be added in a follow-up once a concrete use case emerges.
 
 **Step 10: Conformance Tests**
 
@@ -352,9 +604,11 @@ defmodule Toon.ConformanceTest do
 
   @fixtures_path "test/fixtures"
 
-  # Dynamically generate test cases from JSON fixtures
+  # Dynamically generate test cases from JSON fixtures.
+  # @external_resource ensures recompilation when fixtures change.
   for category <- ["decode", "encode"] do
     for fixture_file <- Path.wildcard("#{@fixtures_path}/#{category}/*.json") do
+      @external_resource fixture_file
       fixture = File.read!(fixture_file) |> Jason.decode!()
       for test_case <- fixture["tests"] do
         @tag spec_section: test_case["specSection"]
@@ -372,30 +626,33 @@ end
 ```
 mix.exs
 lib/
-  toon.ex                         # Public API: encode/2, decode/2, encode_lines/2, decode_from_lines/2, decode_stream/2
+  toon.ex                         # Public API: encode/2, encode!/2, decode/2, decode!/2,
+                                  #             encode_lines/2, decode_from_lines/2
   toon/
-    constants.ex                  # Delimiters, defaults
-    types.ex                      # Typespecs
-    string_utils.ex               # Quoting, escaping (§7.1, §7.2)
-    literal_utils.ex              # Number/bool/null literal parsing
-    validation.ex                 # Shared validation helpers
-    encoder.ex                    # Core encoder (dispatch, objects, arrays)
+    decode_error.ex               # Public: %Toon.DecodeError{} exception
+    encode_error.ex               # Public: %Toon.EncodeError{} exception
+    encoder_protocol.ex           # Public: Toon.Encoder protocol (to_toon/1)
+    constants.ex                  # @moduledoc false - delimiters, defaults
+    string_utils.ex               # @moduledoc false - quoting/escaping (§7.1, §7.2)
+    literal_utils.ex              # @moduledoc false - number/bool/null literal parsing
+    validation.ex                 # @moduledoc false - shared literal validation
     encoder/
-      normalize.ex                # Host-type normalization (§3)
-      primitives.ex               # Primitive encoding
-      folding.ex                  # Key folding (§13.4)
-      replacer.ex                 # Replacer callback support
-    decoder.ex                    # Core decoder entry points
+      core.ex                     # @moduledoc false - dispatch, objects, arrays
+      normalize.ex                # @moduledoc false - host-type normalization (§3)
+      primitives.ex               # @moduledoc false - primitive encoding
+      folding.ex                  # @moduledoc false - key folding (§13.4)
+      replacer.ex                 # @moduledoc false - replacer callback support
     decoder/
-      scanner.ex                  # Line tokenizer, header parsing
-      parser.ex                   # Structural event parser
-      event_builder.ex            # Build value from events
-      expand.ex                   # Path expansion (§13.4)
-      validation.ex               # Strict-mode validation (§14)
+      core.ex                     # @moduledoc false - decoder entry points
+      scanner.ex                  # @moduledoc false - line tokenizer, header parsing
+      parser.ex                   # @moduledoc false - structural event parser
+      event_builder.ex            # @moduledoc false - build value from events
+      expand.ex                   # @moduledoc false - path expansion (§13.4)
+      strict_mode.ex              # @moduledoc false - strict-mode validation (§14)
 test/
   toon_test.exs                   # Smoke tests for public API
   toon/
-    conformance_test.exs          # All spec fixtures
+    conformance_test.exs          # All spec fixtures (uses @external_resource)
     encoder_test.exs              # Unit tests for encoder
     decoder_test.exs              # Unit tests for decoder
     string_utils_test.exs         # Quoting/escaping tests
@@ -406,6 +663,9 @@ README.md
 .formatter.exs
 .gitignore
 ```
+
+> Note: No `lib/toon/types.ex`. Public `@type` declarations live inside `lib/toon.ex`;
+> internal types live inside the modules that own them.
 
 ## Testing
 
@@ -460,8 +720,9 @@ describe "Toon.decode/2" do
       Toon.decode(input)
   end
 
-  test "strict mode raises on length mismatch" do
-    assert {:error, _} = Toon.decode("tags[3]: a,b", strict: true)
+  test "strict mode returns structured error on length mismatch" do
+    assert {:error, %Toon.DecodeError{reason: :length_mismatch}} =
+             Toon.decode("tags[3]: a,b", strict: true)
   end
 
   test "decodes numbers correctly" do
@@ -528,10 +789,16 @@ Rollback: standard git revert (new package, no breaking changes to existing syst
 - [ ] `Toon.encode/2` round-trips with `Toon.decode/2` for all spec examples
 - [ ] Strict mode (`strict: true`) correctly rejects all invalid inputs from `validation-errors.json`
 - [ ] `key_folding: :safe` + `expand_paths: :safe` round-trip losslessly
-- [ ] Streaming encode via `encode_lines/2` returns correct `Enumerable`
-- [ ] Streaming decode via `decode_stream/2` returns correct `Enumerable` of events
+- [ ] Streaming encode via `encode_lines/2` returns a correct `Enumerable.t()`
+- [ ] `decode_from_lines/2` correctly decodes `File.stream!/1` input
 - [ ] Atom-keyed maps normalized correctly in encoder
+- [ ] Keyword lists preserved in original order during encoding
+- [ ] Plain maps encoded with deterministic (sorted-key) output
+- [ ] Custom structs encoded via `Toon.Encoder` protocol (with default `Map.from_struct/1`)
+- [ ] `decode/2` returns `{:error, %Toon.DecodeError{line: _, reason: _}}` on bad input
+- [ ] `encode!/2` and `decode!/2` bang variants work and raise on failure
 - [ ] Number canonicalization: trailing zeros stripped, exponent forms accepted on decode
+- [ ] All options parameters accept keyword lists (not maps)
 - [ ] `mix dialyzer` runs clean
 - [ ] `mix hex.build` succeeds
 - [ ] README complete with installation, quick start, API reference
@@ -555,7 +822,10 @@ Rollback: standard git revert (new package, no breaking changes to existing syst
 ## Follow-up Tasks
 
 1. Submit to `toon-format` organization as official Elixir implementation
-2. Add `encode!/2` and `decode!/2` bang variants that raise on error
-3. Consider `Toon.Sigil` (`~TOON`) for compile-time TOON decoding in tests
-4. Benchmark vs Jason for LLM prompt construction workflows
-5. Optional: `Toon.Encoder` protocol (similar to Jason.Encoder) for custom struct encoding
+2. Consider `Toon.Sigil` (`~TOON`) for compile-time TOON decoding in tests
+3. Benchmark vs Jason for LLM prompt construction workflows
+4. Add a lazy `decode_stream/2` once a concrete consumer requires per-event streaming
+5. Add `NimbleOptions`-based option schema validation for better error messages
+
+> Note: `encode!/2`, `decode!/2`, and the `Toon.Encoder` protocol were moved from
+> Follow-up into the v0.1 Solution per Round 1a architecture review.
