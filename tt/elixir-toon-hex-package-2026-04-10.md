@@ -4,6 +4,7 @@
 **Priority:** P1 (new library — enables Elixir/Phoenix ecosystem to use TOON for LLM prompts)
 **Estimated Effort:** 40 hours
 **Date:** 2026-04-10
+**GitHub Issue:** #1
 **Spec Version:** TOON v3.0
 
 ## Problem
@@ -452,7 +453,7 @@ end
 All commits reference the main tracking issue:
 
 ```bash
-git commit -m "chore: init mix project (#1)"
+git commit -m "chore: init mix project (KirillTemnov/elixir-toon#1)"
 git commit -m "feat(constants): add delimiter types and defaults (#1)"
 git commit -m "feat(encoder): implement normalize and string utils (#1)"
 git commit -m "feat(encoder): implement core encode/object/array (#1)"
