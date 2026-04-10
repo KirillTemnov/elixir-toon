@@ -185,4 +185,21 @@ defmodule Toon do
     opts = Keyword.validate!(opts, [:strict, :expand_paths])
     Toon.Decoder.Core.decode_lines(lines, opts)
   end
+
+  @doc """
+  Decode an `Enumerable.t()` of line binaries into a list of stream events.
+
+  Returns an `Enumerable.t()` of event maps. Raises `Toon.DecodeError` on
+  malformed input or strict-mode violations. This is a synchronous implementation
+  intended for testing and inspection of the raw parse event stream.
+
+  ## Options
+
+    * `:strict` — enable strict-mode validation (default `false`)
+  """
+  @spec decode_stream_sync(Enumerable.t(), keyword()) :: Enumerable.t()
+  def decode_stream_sync(lines, opts \\ []) do
+    opts = Keyword.validate!(opts, [:strict])
+    Toon.Decoder.DecodeStreamSync.decode(lines, opts)
+  end
 end
