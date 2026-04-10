@@ -7,6 +7,38 @@
 **GitHub Issue:** #1
 **Spec Version:** TOON v3.0
 
+## Review Panel Discussion
+
+### Round 0: CLAUDE.md Compliance Check
+**Reviewer:** @compliance-auditor
+**Timestamp:** 2026-04-10
+**Status:** ⚠️ WARNINGS — 1 VIOLATION FOUND AND FIXED
+
+**Compliance Scan Results:**
+
+**✅ COMPLIANT:**
+- English in all code blocks and inline comments — no non-English text found in any code block
+- No Russian text anywhere in the document (`grep [а-яА-Я]` → 0 matches)
+- TZ written in English (global.md permits Russian or English for `/tt` specs)
+- Atomic commits with issue references — Implementation Workflow lists 14 granular commits, each referencing `#1`
+- Conventional Commits format — all commit messages use `feat:`, `chore:`, `test:`, `docs:` prefixes
+- GitHub Issue reference present — `**GitHub Issue:** #1` in the header
+- Elixir naming conventions correct — Modules PascalCase (`Toon`, `Toon.Constants`, `Toon.Encoder.Normalize`), functions snake_case (`encode/2`, `decode/2`, `needs_quoting?/2`), files snake_case (`constants.ex`, `string_utils.ex`)
+- Error handling — `decode/2` returns `{:ok, json_value()} | {:error, term()}` tuples throughout
+- Tests in English — all `describe`/`test` blocks use English names and assertions
+
+**❌ VIOLATIONS (Must fix):**
+1. **VIOLATION: File endings with newline**
+   - **Location:** Notes section — implementation guidance
+   - **Problem:** global.md mandates `\n` at end of every file, but the TZ contains no instruction to developers to add a trailing newline to each generated `.ex` file. Without this note implementers may skip it.
+   - **Required Fix:** Add explicit note in the Notes section: all source files must end with a newline character (`\n`).
+   - **Action:** FIXED
+
+**Changes Made:**
+- Added note to Notes section: "All source files must end with a trailing newline (`\n`), per project formatting rules."
+
+---
+
 ## Problem
 
 There is no Elixir implementation of the TOON format (Token-Oriented Object Notation). The
@@ -517,6 +549,8 @@ Rollback: standard git revert (new package, no breaking changes to existing syst
 - **Atom key normalization:** `encode(%{name: "Alice"})` must work — convert atom keys to strings
 - The spec fixtures use `"specSection"` field for cross-referencing; tag ExUnit tests with
   `@tag spec_section: ...` for selective test runs
+- **File endings:** All source files (`.ex`, `.exs`, `mix.exs`, `.formatter.exs`, `.gitignore`) must
+  end with a trailing newline (`\n`), per project formatting rules
 
 ## Follow-up Tasks
 
